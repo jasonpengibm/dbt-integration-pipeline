@@ -138,12 +138,97 @@ pipeline {
         }
         stage('Per-catalog pytest sweep (Hudi/Delta)') {
             steps {
-                echo 'TODO: implement in Task 9'
+                script {
+                    // === 3-part naming workaround ===
+                    // Only Iceberg supports catalog.schema.table naming today.
+                    // Hive/Hudi/Delta must use the literal 'spark_catalog' as the
+                    // session catalog. Delete this block when the platform ships
+                    // full 3-part support (~est. Nov 2026 per teammate).
+                    def CATALOGS_REQUIRING_SPARK_CATALOG_ALIAS = ['hudi', 'delta', 'hive'] as Set
+                    def effectiveCatalog = { String catalogType, String userSuppliedName ->
+                        if (CATALOGS_REQUIRING_SPARK_CATALOG_ALIAS.contains(catalogType.toLowerCase())) {
+                            return 'spark_catalog'
+                        }
+                        return userSuppliedName
+                    }
+                    // === /workaround ===
+
+                    def profileName = params.ENABLE_AUTHZ ? 'watsonx_authz_test' : 'watsonx_test'
+                    def qsName = params.ENABLE_AUTHZ ? 'dbt-authz-qs' : 'dbt-standard-qs'
+
+                    def rounds = [
+                        [type: 'hudi',  name: params.HUDI_CATALOG_NAME],
+                        [type: 'delta', name: params.DELTA_CATALOG_NAME],
+                    ].findAll { it.name?.trim() }
+
+                    if (rounds.isEmpty()) {
+                        echo 'No Hudi/Delta catalogs requested; skipping sweep.'
+                        return
+                    }
+
+                    for (round in rounds) {
+                        def catalogType = round.type
+                        def catalogName = round.name
+                        def effective = effectiveCatalog(catalogType, catalogName)
+                        catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                            sh '''
+                                set -euo pipefail
+                                export HOME="${WORKSPACE}/.home"
+                                # shellcheck disable=SC1091
+                                source "${WORKSPACE}/.venv/bin/activate"
+
+                                # Re-authenticate and look up the query server URI.
+                                # (We don't source the given scripts because their main() runs on source.)
+                                AUTH_TOKEN=$(curl -s -k -X POST \\
+                                    "${WATSONX_HOSTNAME}/icp4d-api/v1/authorize" \\
+                                    -H "Content-Type: application/json" \\
+                                    -d "{\\"username\\":\\"${CPD_USERNAME}\\",\\"api_key\\":\\"${WATSONX_APIKEY}\\"}" \\
+                                    | jq -r .token)
+
+                                ENGINE_ID=$(curl -s -k -X GET \\
+                                    "${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/spark_engines" \\
+                                    -H "Authorization: Bearer ${AUTH_TOKEN}" \\
+                                    -H "LhInstanceId: ${WATSONX_INSTANCE_ID}" \\
+                                    | jq -r ".spark_engines[]? | select(.display_name==\\"${SPARK_ENGINE_NAME}\\") | .id // .engine_id" \\
+                                    | head -n1)
+
+                                QS_ID=$(curl -s -k -X GET \\
+                                    "${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/spark_engines/${ENGINE_ID}/query_servers" \\
+                                    -H "Authorization: Bearer ${AUTH_TOKEN}" \\
+                                    -H "LhInstanceId: ${WATSONX_INSTANCE_ID}" \\
+                                    | jq -r ".query_servers[]? | select(.query_server_details.name==\\"'''+"${qsName}"+'''\\") | .id" \\
+                                    | head -n1)
+
+                                export WATSONX_URI="/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/spark_engines/${ENGINE_ID}/query_servers/${QS_ID}/connect/cliservice"
+                                export WATSONX_CATALOG="'''+"${effective}"+'''"
+                                export WATSONX_SCHEMA="wxd_schema"
+                                export WATSONX_HOST="${WATSONX_HOSTNAME}"
+                                export WATSONX_INSTANCE="${WATSONX_INSTANCE_ID}"
+                                export WATSONX_USER="${CPD_USERNAME}"
+                                export PROFILE_NAME="'''+"${profileName}"+'''"
+                                export ADAPTER_ROOT="${WORKSPACE}/adapter"
+                                export PYTEST_TEST_PATTERN="tests/functional/adapter/catalog_tests/"
+
+                                echo "[sweep] catalog_type='''+"${catalogType}"+''' effective=${WATSONX_CATALOG}"
+                                bash "${WORKSPACE}/pipeline/run_pytest_for_catalog.sh"
+                            '''
+                        }
+                    }
+                }
             }
         }
         stage('Report') {
             steps {
-                echo 'TODO: implement in Task 9'
+                sh '''
+                    set -euo pipefail
+                    echo "=== Build summary ==="
+                    echo "deployment=${DEPLOYMENT_TYPE} authz='''+"${params.ENABLE_AUTHZ}"+'''"
+                    echo "engine=${SPARK_ENGINE_NAME}"
+                    if [ -f "${WORKSPACE}/.pipeline-marker.json" ]; then
+                        cat "${WORKSPACE}/.pipeline-marker.json"
+                    fi
+                '''
+                junit allowEmptyResults: true, testResults: 'adapter/**/junit*.xml'
             }
         }
     }
