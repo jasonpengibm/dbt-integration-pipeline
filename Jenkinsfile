@@ -89,12 +89,51 @@ pipeline {
         }
         stage('Write .env') {
             steps {
-                echo 'TODO: implement in Task 8'
+                sh '''
+                    set -euo pipefail
+                    set +x
+                    export HOME="${WORKSPACE}/.home"
+                    export ICEBERG_CATALOG_NAME="'''+"${params.ICEBERG_CATALOG_NAME}"+'''"
+                    export HUDI_CATALOG_NAME="'''+"${params.HUDI_CATALOG_NAME}"+'''"
+                    export DELTA_CATALOG_NAME="'''+"${params.DELTA_CATALOG_NAME}"+'''"
+                    bash "${WORKSPACE}/pipeline/write_env.sh" "${WORKSPACE}/adapter/.env"
+                '''
             }
         }
         stage('Run given script (infra + Iceberg pytest)') {
             steps {
-                echo 'TODO: implement in Task 8'
+                sh '''
+                    set -euo pipefail
+                    export HOME="${WORKSPACE}/.home"
+                    # Deploy the given scripts into the adapter checkout so their SCRIPT_DIR/..
+                    # resolves to the adapter root (where tests/ lives).
+                    mkdir -p "${WORKSPACE}/adapter/scripts"
+                    cp -f "${WORKSPACE}/scripts/run_test.sh" "${WORKSPACE}/adapter/scripts/run_test.sh"
+                    cp -f "${WORKSPACE}/scripts/run_catalog_tests.sh" "${WORKSPACE}/adapter/scripts/run_catalog_tests.sh"
+                    chmod +x "${WORKSPACE}/adapter/scripts/"*.sh
+
+                    # Initialize marker
+                    # shellcheck disable=SC1091
+                    source "${WORKSPACE}/pipeline/marker_utils.sh"
+                    marker_init "${WORKSPACE}/.pipeline-marker.json" "'''+"${env.BUILD_TAG}"+'''"
+
+                    # Activate venv and cd to adapter root
+                    # shellcheck disable=SC1091
+                    source "${WORKSPACE}/.venv/bin/activate"
+                    cd "${WORKSPACE}/adapter"
+
+                    if [ "'''+"${params.SKIP_INFRA}"+'''" = "true" ]; then
+                        SCRIPT="./scripts/run_test.sh"
+                    else
+                        SCRIPT="./scripts/run_catalog_tests.sh"
+                    fi
+
+                    # ENABLE_AUTHZ is threaded via env — the given scripts do not read it directly,
+                    # but the pipeline's later stages will select the right query server profile.
+                    export ENABLE_AUTHZ="'''+"${params.ENABLE_AUTHZ}"+'''"
+
+                    "$SCRIPT"
+                '''
             }
         }
         stage('Per-catalog pytest sweep (Hudi/Delta)') {
