@@ -18,8 +18,9 @@ marker_record_engine() {
     tmp=$(mktemp)
     jq --arg eid "$engine_id" \
         '.engine_id = $eid | .engine_created_by_this_run = true' \
-        "$marker_path" > "$tmp"
-    mv "$tmp" "$marker_path"
+        "$marker_path" > "$tmp" \
+        && mv "$tmp" "$marker_path" \
+        || { rm -f "$tmp"; return 1; }
 }
 
 marker_record_catalog_created() {
@@ -27,8 +28,9 @@ marker_record_catalog_created() {
     local catalog=$2
     local tmp
     tmp=$(mktemp)
-    jq --arg c "$catalog" '.catalogs_created += [$c]' "$marker_path" > "$tmp"
-    mv "$tmp" "$marker_path"
+    jq --arg c "$catalog" '.catalogs_created += [$c]' "$marker_path" > "$tmp" \
+        && mv "$tmp" "$marker_path" \
+        || { rm -f "$tmp"; return 1; }
 }
 
 marker_record_catalog_reused() {
@@ -36,8 +38,9 @@ marker_record_catalog_reused() {
     local catalog=$2
     local tmp
     tmp=$(mktemp)
-    jq --arg c "$catalog" '.catalogs_reused += [$c]' "$marker_path" > "$tmp"
-    mv "$tmp" "$marker_path"
+    jq --arg c "$catalog" '.catalogs_reused += [$c]' "$marker_path" > "$tmp" \
+        && mv "$tmp" "$marker_path" \
+        || { rm -f "$tmp"; return 1; }
 }
 
 marker_get_catalogs_created() {
