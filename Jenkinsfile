@@ -235,7 +235,50 @@ pipeline {
 
     post {
         always {
-            echo 'TODO: implement teardown in Task 10'
+            script {
+                sh '''
+                    set +e
+                    set +x
+                    export HOME="${WORKSPACE}/.home"
+
+                    if [ -f "${WORKSPACE}/.pipeline-marker.json" ]; then
+                        # Get auth token
+                        AUTH_TOKEN=$(curl -s -k -X POST \\
+                            "${WATSONX_HOSTNAME}/icp4d-api/v1/authorize" \\
+                            -H "Content-Type: application/json" \\
+                            -d "{\\"username\\":\\"${CPD_USERNAME}\\",\\"api_key\\":\\"${WATSONX_APIKEY}\\"}" \\
+                            | jq -r .token)
+                        export AUTH_TOKEN
+                        export LAKEHOUSE_API_VERSION="v3"
+
+                        if [ "'''+"${params.DELETE_CATALOG_AFTER_TEST}"+'''" = "true" ]; then
+                            echo "[teardown] DELETE_CATALOG_AFTER_TEST=true; running cleanup_catalogs.sh"
+                            bash "${WORKSPACE}/pipeline/cleanup_catalogs.sh" "${WORKSPACE}/.pipeline-marker.json" || true
+                        else
+                            echo "[teardown] DELETE_CATALOG_AFTER_TEST=false; leaving catalogs in place"
+                        fi
+
+                        # Delete this build's Spark engine unconditionally (unique-named per build).
+                        # shellcheck disable=SC1091
+                        source "${WORKSPACE}/pipeline/marker_utils.sh"
+                        ENGINE_ID=$(marker_get_engine_id "${WORKSPACE}/.pipeline-marker.json")
+                        if [ -n "$ENGINE_ID" ]; then
+                            echo "[teardown] deleting Spark engine $ENGINE_ID"
+                            curl -s -k -X DELETE \\
+                                "${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/spark_engines/${ENGINE_ID}" \\
+                                -H "Authorization: Bearer ${AUTH_TOKEN}" \\
+                                -H "LhInstanceId: ${WATSONX_INSTANCE_ID}" || true
+                        fi
+                    else
+                        echo "[teardown] no marker file; nothing to clean up"
+                    fi
+
+                    # Workspace purge
+                    rm -rf "${WORKSPACE}/.venv" "${WORKSPACE}/.home" \\
+                           "${WORKSPACE}/adapter/.env" "${WORKSPACE}/.env" \\
+                           "${WORKSPACE}/adapter" "${WORKSPACE}/.pipeline-marker.json"
+                '''
+            }
         }
     }
 }
