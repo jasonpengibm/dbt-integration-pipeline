@@ -22,7 +22,7 @@ if ! declare -F _pipeline_curl >/dev/null 2>&1; then
         # method path
         local method=$1
         local path=$2
-        curl -s -k -X "$method" \
+        curl -s -k -f --show-error -X "$method" \
             -H "Authorization: Bearer $AUTH_TOKEN" \
             -H "LhInstanceId: $WATSONX_INSTANCE_ID" \
             "${WATSONX_HOSTNAME%/}${path}"

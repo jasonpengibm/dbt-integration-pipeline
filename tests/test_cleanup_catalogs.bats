@@ -78,3 +78,14 @@ run_cleanup_with_mock() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"marker"* ]]
 }
+
+@test "_pipeline_curl invokes curl with -f/--show-error so HTTP 4xx/5xx trip the fallback" {
+    run bash -c '
+        # shellcheck disable=SC1091
+        source "'"${BATS_TEST_DIRNAME}"'/../pipeline/cleanup_catalogs.sh"
+        declare -f _pipeline_curl
+    '
+    [ "$status" -eq 0 ]
+    [[ "$output" == *" -f "* ]]
+    [[ "$output" == *"--show-error"* ]]
+}

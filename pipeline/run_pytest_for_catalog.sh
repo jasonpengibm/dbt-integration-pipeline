@@ -23,6 +23,11 @@ require ADAPTER_ROOT
 WATSONX_SCHEMA="${WATSONX_SCHEMA:-wxd_schema}"
 WATSONX_USER="${WATSONX_USER:-admin}"
 PYTEST_TEST_PATTERN="${PYTEST_TEST_PATTERN:-tests/functional/adapter/}"
+# CATALOG_TYPE (e.g. hudi/delta) disambiguates the JUnit report filename when the
+# 3-part naming workaround collapses WATSONX_CATALOG to the same literal value
+# ("spark_catalog") across rounds (see the Jenkinsfile aliasing shim). Falls back
+# to WATSONX_CATALOG when the caller doesn't set it (e.g. the Iceberg round).
+JUNIT_SUFFIX="${CATALOG_TYPE:-$WATSONX_CATALOG}"
 
 export WATSONX_CATALOG WATSONX_SCHEMA WATSONX_URI WATSONX_HOST
 export WATSONX_APIKEY WATSONX_INSTANCE WATSONX_USER
@@ -30,4 +35,4 @@ export WATSONX_APIKEY WATSONX_INSTANCE WATSONX_USER
 cd "$ADAPTER_ROOT"
 
 echo "[pytest] catalog=$WATSONX_CATALOG profile=$PROFILE_NAME pattern=$PYTEST_TEST_PATTERN"
-exec pytest "$PYTEST_TEST_PATTERN" -v --profile "$PROFILE_NAME" --tb=short
+exec pytest "$PYTEST_TEST_PATTERN" -v --profile "$PROFILE_NAME" --tb=short "--junitxml=junit-${JUNIT_SUFFIX}.xml"
