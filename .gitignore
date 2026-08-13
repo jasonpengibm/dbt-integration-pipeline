@@ -1,0 +1,9 @@
+.superpowers/
+.venv/
+.home/
+.env
+.pipeline-marker.json
+__pycache__/
+*.pyc
+.pytest_cache/
+adapter/
