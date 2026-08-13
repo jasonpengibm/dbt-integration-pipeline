@@ -36,17 +36,55 @@ pipeline {
     stages {
         stage('Validate params') {
             steps {
-                echo 'TODO: implement in Task 7'
+                script {
+                    def anyCatalog = [params.ICEBERG_CATALOG_NAME, params.HUDI_CATALOG_NAME, params.DELTA_CATALOG_NAME]
+                        .any { it?.trim() }
+                    if (!anyCatalog) {
+                        error 'At least one of ICEBERG_CATALOG_NAME, HUDI_CATALOG_NAME, DELTA_CATALOG_NAME must be non-empty.'
+                    }
+                    if (!(params.DEPLOYMENT_FORM in ['CPD', 'SAAS'])) {
+                        error "DEPLOYMENT_FORM must be CPD or SAAS, got: ${params.DEPLOYMENT_FORM}"
+                    }
+                    if (params.SKIP_INFRA && params.DEPLOYMENT_FORM == 'SAAS') {
+                        error 'SKIP_INFRA=true is not supported with DEPLOYMENT_FORM=SAAS (run_test.sh is CPD-only).'
+                    }
+                    echo "Params validated: deployment=${params.DEPLOYMENT_FORM}, authz=${params.ENABLE_AUTHZ}, skip_infra=${params.SKIP_INFRA}"
+                }
             }
         }
         stage('Checkout adapter') {
             steps {
-                echo 'TODO: implement in Task 7'
+                sh '''
+                    set -euo pipefail
+                    rm -rf "${WORKSPACE}/adapter"
+                    git clone --depth 1 --branch "'''+"${params.DBT_ADAPTER_BRANCH}"+'''" \\
+                        "'''+"${params.ADAPTER_REPO_URL}"+'''" "${WORKSPACE}/adapter"
+                    (cd "${WORKSPACE}/adapter" && git log -1 --oneline)
+                '''
             }
         }
         stage('Prepare workspace') {
             steps {
-                echo 'TODO: implement in Task 7'
+                script {
+                    // BUILD_TAG_SHORT: strip 'jenkins-' prefix, keep it URL-safe
+                    def shortTag = env.BUILD_TAG.replaceAll('[^A-Za-z0-9-]', '-').take(32)
+                    def authzMode = params.ENABLE_AUTHZ ? 'authz' : 'std'
+                    env.SPARK_ENGINE_NAME = "spark-dbt-${shortTag}-${params.DEPLOYMENT_FORM.toLowerCase()}-${authzMode}"
+                    env.DEPLOYMENT_TYPE = params.DEPLOYMENT_FORM.toLowerCase()
+                    env.PYTHON_VENV_PATH = "${env.WORKSPACE}/.venv"
+                }
+                sh '''
+                    set -euo pipefail
+                    export HOME="${WORKSPACE}/.home"
+                    mkdir -p "$HOME/.dbt"
+
+                    python3 -m venv "${WORKSPACE}/.venv"
+                    # shellcheck disable=SC1091
+                    source "${WORKSPACE}/.venv/bin/activate"
+                    pip install --upgrade pip
+                    pip install -e "${WORKSPACE}/adapter"
+                    pip install pytest dbt-tests-adapter
+                '''
             }
         }
         stage('Write .env') {
