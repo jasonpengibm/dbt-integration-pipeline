@@ -1,0 +1,4 @@
+# Follow sourced files with -x
+external-sources=true
+# Allow POSIX-non-compliant bash idioms
+shell=bash
