@@ -28,8 +28,6 @@ pipeline {
         string(name: 'LAKEHOUSE_CONSOLE_VERSION', defaultValue: '2.2.x', description: 'Target watsonx.data Console version')
         string(name: 'DBT_ADAPTER_BRANCH',   defaultValue: 'main', description: 'Target branch/tag of dbt-watsonx-data')
         string(name: 'ADAPTER_REPO_URL',     defaultValue: 'https://github.com/roneymathew/dbt-watsonx-spark.git', description: '')
-        string(name: 'PIPELINE_REPO_URL',    defaultValue: '', description: 'URL of this pipeline repo (dbt-integration-pipeline). Required when running as Pipeline script (not from SCM).')
-        string(name: 'PIPELINE_REPO_BRANCH', defaultValue: 'main', description: 'Branch of the pipeline repo to check out.')
         string(name: 'TIMEOUT_MINUTES',      defaultValue: '90', description: 'Overall build timeout')
     }
 
@@ -65,31 +63,6 @@ pipeline {
                         error 'WATSONX_INSTANCE_ID is required.'
                     }
                     echo "Params validated: deployment=${params.DEPLOYMENT_FORM}, authz=${params.ENABLE_AUTHZ}, skip_infra=${params.SKIP_INFRA}"
-                }
-            }
-        }
-        stage('Checkout pipeline repo') {
-            when {
-                // Only run when executing as a Pipeline script (not from SCM).
-                // When loaded from SCM the files are already in WORKSPACE.
-                expression { return params.PIPELINE_REPO_URL?.trim() as boolean }
-            }
-            steps {
-                withEnv([
-                    "PIPELINE_REPO=${params.PIPELINE_REPO_URL}",
-                    "PIPELINE_BRANCH=${params.PIPELINE_REPO_BRANCH}"
-                ]) {
-                    sh '''
-                        set -euo pipefail
-                        # Clone into a temp dir then copy pipeline/ and scripts/ into WORKSPACE.
-                        # Avoids clobbering anything Jenkins already placed in the root.
-                        TMPDIR=$(mktemp -d)
-                        git clone --depth 1 --branch "$PIPELINE_BRANCH" "$PIPELINE_REPO" "$TMPDIR"
-                        cp -rf "$TMPDIR/pipeline" "${WORKSPACE}/pipeline"
-                        cp -rf "$TMPDIR/scripts"  "${WORKSPACE}/scripts"
-                        rm -rf "$TMPDIR"
-                        echo "[pipeline-checkout] pipeline/ and scripts/ ready in ${WORKSPACE}"
-                    '''
                 }
             }
         }
