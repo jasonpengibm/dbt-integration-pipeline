@@ -20,6 +20,19 @@ pipeline {
         string(name: 'DELTA_CATALOG_NAME',   defaultValue: 'delta_data',   description: 'Delta catalog name. Empty to skip Delta.')
         string(name: 'HIVE_CATALOG_NAME',    defaultValue: '',             description: 'Reserved for future. Ignored in v1.')
         booleanParam(name: 'DELETE_CATALOG_AFTER_TEST', defaultValue: true, description: 'Delete/drop dynamic test catalogs post-execution')
+        // S3/COS storage — required by run_catalog_tests.sh for CPD catalog creation
+        string(name: 'STORAGE_ENDPOINT',   defaultValue: '', description: 'S3-compatible storage endpoint URL (e.g. https://s3.us-south.cloud-object-storage.appdomain.cloud).')
+        string(name: 'STORAGE_ACCESS_KEY', defaultValue: '', description: 'S3 access key (HMAC credential).')
+        string(name: 'STORAGE_SECRET_KEY', defaultValue: '', description: 'S3 secret key (HMAC credential).')
+        string(name: 'STORAGE_REGION',     defaultValue: 'us-south', description: 'S3 region for catalog storage.')
+        string(name: 'ICEBERG_BUCKET',     defaultValue: 'iceberg-bucket', description: 'S3 bucket name for Iceberg catalog.')
+        string(name: 'DELTA_BUCKET',       defaultValue: 'delta-bucket',   description: 'S3 bucket name for Delta catalog.')
+        string(name: 'HUDI_BUCKET',        defaultValue: 'hudi-bucket',    description: 'S3 bucket name for Hudi catalog.')
+        // Spark engine volume — required by run_catalog_tests.sh for CPD engine creation.
+        // Provide the numeric volume instance_id from the CPD spark_instances API.
+        // If left blank the script tries to look it up by name, which is unreliable.
+        string(name: 'SPARK_ENGINE_VOLUME_ID', defaultValue: '', description: 'Numeric volume instance_id for the Spark engine home (CPD only). Leave blank to use volume_name lookup (unreliable).')
+        string(name: 'SPARK_ENGINE_VOLUME_NAME', defaultValue: 'spark-engine-volume', description: 'Volume name for Spark engine home (used only when SPARK_ENGINE_VOLUME_ID is blank).')
         string(name: 'LAKEHOUSE_CONSOLE_VERSION', defaultValue: '2.2.x', description: 'Target watsonx.data Console version')
         string(name: 'DBT_ADAPTER_BRANCH',   defaultValue: 'main', description: 'Target branch/tag of dbt-watsonx-data')
         string(name: 'ADAPTER_REPO_URL',     defaultValue: 'https://github.com/roneymathew/dbt-watsonx-spark.git', description: '')
@@ -133,7 +146,16 @@ pipeline {
                     "CPD_PASSWORD=${params.CPD_PASSWORD}",
                     "ICEBERG_CATALOG_NAME=${params.ICEBERG_CATALOG_NAME}",
                     "HUDI_CATALOG_NAME=${params.HUDI_CATALOG_NAME}",
-                    "DELTA_CATALOG_NAME=${params.DELTA_CATALOG_NAME}"
+                    "DELTA_CATALOG_NAME=${params.DELTA_CATALOG_NAME}",
+                    "STORAGE_ENDPOINT=${params.STORAGE_ENDPOINT}",
+                    "STORAGE_ACCESS_KEY=${params.STORAGE_ACCESS_KEY}",
+                    "STORAGE_SECRET_KEY=${params.STORAGE_SECRET_KEY}",
+                    "STORAGE_REGION=${params.STORAGE_REGION}",
+                    "ICEBERG_BUCKET=${params.ICEBERG_BUCKET}",
+                    "DELTA_BUCKET=${params.DELTA_BUCKET}",
+                    "HUDI_BUCKET=${params.HUDI_BUCKET}",
+                    "SPARK_ENGINE_VOLUME_ID=${params.SPARK_ENGINE_VOLUME_ID}",
+                    "SPARK_ENGINE_VOLUME_NAME=${params.SPARK_ENGINE_VOLUME_NAME}"
                 ]) {
                     sh '''
                         set -euo pipefail
