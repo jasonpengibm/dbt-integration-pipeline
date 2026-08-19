@@ -245,38 +245,13 @@ pipeline {
                         # junit publisher has something to find.
                         export PYTEST_ADDOPTS="--junitxml=junit-iceberg.xml"
 
-                        # Override get_available_volume_id in the given script's subshell.
-                        # The real implementation mixes log_info/log_warning output (which go
-                        # to stdout) with its return value, so the caller captures garbage.
-                        # Our override reads the same API cleanly — only the numeric ID goes
-                        # to stdout; all log lines go to stderr.
-                        # Re-read SPARK_ENGINE_VOLUME_ID from .env (may have been set by Write .env).
-                        SPARK_ENGINE_VOLUME_ID=$(grep '^SPARK_ENGINE_VOLUME_ID=' "${WORKSPACE}/adapter/.env" 2>/dev/null | cut -d= -f2- || true)
-                        get_available_volume_id() {
-                            local vname="${1:-spark-engine-volume}"
-                            # If pipeline already resolved it, return immediately.
-                            if [ -n "${SPARK_ENGINE_VOLUME_ID:-}" ]; then
-                                echo "$SPARK_ENGINE_VOLUME_ID"
-                                return 0
-                            fi
-                            local base_url resp vol_id
-                            base_url="${WATSONX_HOSTNAME}"
-                            resp=$(curl -s -k -X GET \
-                                "${base_url}/lakehouse/api/${LAKEHOUSE_API_VERSION:-v3}/${WATSONX_INSTANCE_ID}/cpd/spark_instances" \
-                                -H "Authorization: Bearer ${AUTH_TOKEN}" \
-                                -H "LhInstanceId: ${WATSONX_INSTANCE_ID}" 2>/dev/null)
-                            vol_id=$(echo "$resp" | jq -r \
-                                ".volumes[]? | select(.display_name == \"cpd-instance::${vname}\") | .instance_id // empty" \
-                                2>/dev/null | head -n1)
-                            if [ -n "$vol_id" ]; then
-                                echo "[volume-shim] found $vname → $vol_id" >&2
-                                echo "$vol_id"
-                                return 0
-                            else
-                                echo "[volume-shim] $vname not found; will create new volume" >&2
-                                return 1
-                            fi
-                        }
+                        # Source the volume shim BEFORE invoking the given script.
+                        # pipeline/volume_shim.sh redefines get_available_volume_id so
+                        # that only the numeric ID goes to stdout (the real implementation
+                        # pollutes stdout with log lines, corrupting the captured volume_id).
+                        # export -f makes the override visible inside the given script's subshell.
+                        # shellcheck disable=SC1091
+                        source "${WORKSPACE}/pipeline/volume_shim.sh"
                         export -f get_available_volume_id
 
                         "$SCRIPT"
