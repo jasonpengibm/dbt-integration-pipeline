@@ -196,16 +196,23 @@ pipeline {
                         if [ -n "$SPARK_ENGINE_VOLUME_ID" ]; then
                             echo "[volume] Found volume ID: ${SPARK_ENGINE_VOLUME_ID}"
                         else
-                            echo "[volume] WARNING: spark-engine-volume not found; engine creation will use volume_name fallback"
+                            echo "[volume] WARNING: spark-engine-volume not found; engine will be created with a new volume"
                         fi
                         export SPARK_ENGINE_VOLUME_ID
 
                         bash "${WORKSPACE}/pipeline/write_env.sh" "${WORKSPACE}/adapter/.env"
 
-                        # Append AUTH_TOKEN and resolved volume ID so the given scripts
-                        # source them and skip their own (broken) auth and volume lookup.
+                        # Append AUTH_TOKEN so the given scripts source it and skip their
+                        # own auth (which uses "api_key" and would fail with a plain password).
                         echo "AUTH_TOKEN=${AUTH_TOKEN}" >> "${WORKSPACE}/adapter/.env"
-                        echo "SPARK_ENGINE_VOLUME_ID=${SPARK_ENGINE_VOLUME_ID}" >> "${WORKSPACE}/adapter/.env"
+                        # Only append SPARK_ENGINE_VOLUME_ID when non-empty — an empty value
+                        # in .env causes the given script to run its own broken lookup (which
+                        # pollutes stdout with log lines, corrupting the captured volume_id).
+                        # When omitted, the script falls through to the "create new volume"
+                        # branch which uses SPARK_ENGINE_VOLUME_NAME instead.
+                        if [ -n "$SPARK_ENGINE_VOLUME_ID" ]; then
+                            echo "SPARK_ENGINE_VOLUME_ID=${SPARK_ENGINE_VOLUME_ID}" >> "${WORKSPACE}/adapter/.env"
+                        fi
 
                         echo "[write_env] .env key values:"
                         grep -E '^(DEPLOYMENT_TYPE|SPARK_ENGINE_NAME|SPARK_ENGINE_VOLUME_ID|STORAGE_ENDPOINT|ICEBERG_BUCKET|DELTA_BUCKET|HUDI_BUCKET)=' \
@@ -264,6 +271,40 @@ pipeline {
                         # PYTEST_ADDOPTS lets pytest pick up --junitxml so the Report stage's
                         # junit publisher has something to find.
                         export PYTEST_ADDOPTS="--junitxml=junit-iceberg.xml"
+
+                        # Override get_available_volume_id in the given script's subshell.
+                        # The real implementation mixes log_info/log_warning output (which go
+                        # to stdout) with its return value, so the caller captures garbage.
+                        # Our override reads the same API cleanly — only the numeric ID goes
+                        # to stdout; all log lines go to stderr.
+                        # Re-read SPARK_ENGINE_VOLUME_ID from .env (may have been set by Write .env).
+                        SPARK_ENGINE_VOLUME_ID=$(grep '^SPARK_ENGINE_VOLUME_ID=' "${WORKSPACE}/adapter/.env" 2>/dev/null | cut -d= -f2- || true)
+                        get_available_volume_id() {
+                            local vname="${1:-spark-engine-volume}"
+                            # If pipeline already resolved it, return immediately.
+                            if [ -n "${SPARK_ENGINE_VOLUME_ID:-}" ]; then
+                                echo "$SPARK_ENGINE_VOLUME_ID"
+                                return 0
+                            fi
+                            local base_url resp vol_id
+                            base_url="${WATSONX_HOSTNAME}"
+                            resp=$(curl -s -k -X GET \
+                                "${base_url}/lakehouse/api/${LAKEHOUSE_API_VERSION:-v3}/${WATSONX_INSTANCE_ID}/cpd/spark_instances" \
+                                -H "Authorization: Bearer ${AUTH_TOKEN}" \
+                                -H "LhInstanceId: ${WATSONX_INSTANCE_ID}" 2>/dev/null)
+                            vol_id=$(echo "$resp" | jq -r \
+                                ".volumes[]? | select(.display_name == \"cpd-instance::${vname}\") | .instance_id // empty" \
+                                2>/dev/null | head -n1)
+                            if [ -n "$vol_id" ]; then
+                                echo "[volume-shim] found $vname → $vol_id" >&2
+                                echo "$vol_id"
+                                return 0
+                            else
+                                echo "[volume-shim] $vname not found; will create new volume" >&2
+                                return 1
+                            fi
+                        }
+                        export -f get_available_volume_id
 
                         "$SCRIPT"
 
