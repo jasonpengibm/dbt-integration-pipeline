@@ -219,30 +219,31 @@ pipeline {
                         chmod +x "${WORKSPACE}/adapter/scripts/"*.sh
 
                         # Patch the working copy of run_catalog_tests.sh: inject a
-                        # "source <shim>" line immediately BEFORE the "# Run main function"
-                        # comment. The shim redefines get_available_volume_id after the
-                        # original definition, so bash uses the shim when main() runs.
-                        # Python is used for the injection to avoid shell quoting / delimiter
-                        # issues with sed when SHIM_PATH contains slashes.
+                        # "source <shim>" line immediately before the "# Run main function"
+                        # anchor. run_catalog_tests.sh defines get_available_volume_id itself
+                        # (line ~756), which overrides any exported version, so the shim must
+                        # be sourced AFTER that definition and BEFORE main() runs.
                         SHIM_PATH="${WORKSPACE}/pipeline/volume_shim.sh"
                         SCRIPT_COPY="${WORKSPACE}/adapter/scripts/run_catalog_tests.sh"
                         if ! grep -q 'volume_shim.sh' "$SCRIPT_COPY"; then
-                            python3 - "${SCRIPT_COPY}" "${SHIM_PATH}" <<'PYEOF'
-import sys
-script_path, shim_path = sys.argv[1], sys.argv[2]
-with open(script_path) as f:
-    lines = f.readlines()
-anchor = '# Run main function\n'
-idx = next((i for i, l in enumerate(lines) if l == anchor), None)
-if idx is not None:
-    lines.insert(idx, f'source "{shim_path}"\n')
-    lines.insert(idx, '# volume shim injected by pipeline\n')
-    with open(script_path, 'w') as f:
-        f.writelines(lines)
-    print("[patch] injected volume_shim.sh before main() call")
-else:
-    print("[patch] WARNING: anchor '# Run main function' not found — shim not injected", file=__import__('sys').stderr)
-PYEOF
+                            # Pass the double-quote character as an awk variable to avoid
+                            # any quoting/escape conflict between Groovy, shell, and awk.
+                            awk -v shim="$SHIM_PATH" -v q='"' '
+                                /^# Run main function$/ && !injected {
+                                    print "# volume shim injected by pipeline"
+                                    print "source " q shim q
+                                    injected = 1
+                                }
+                                { print }
+                                END {
+                                    if (!injected) {
+                                        print "[patch] ERROR: anchor line not found in run_catalog_tests.sh" > "/dev/stderr"
+                                        exit 1
+                                    }
+                                }
+                            ' "$SCRIPT_COPY" > "${SCRIPT_COPY}.new"
+                            mv "${SCRIPT_COPY}.new" "$SCRIPT_COPY"
+                            echo "[patch] injected volume_shim.sh before main() call"
                         fi
 
                         # Re-read the token written by Write .env (avoids re-authing).
@@ -271,15 +272,6 @@ PYEOF
                         # PYTEST_ADDOPTS lets pytest pick up --junitxml so the Report stage's
                         # junit publisher has something to find.
                         export PYTEST_ADDOPTS="--junitxml=junit-iceberg.xml"
-
-                        # Source the volume shim BEFORE invoking the given script.
-                        # pipeline/volume_shim.sh redefines get_available_volume_id so
-                        # that only the numeric ID goes to stdout (the real implementation
-                        # pollutes stdout with log lines, corrupting the captured volume_id).
-                        # export -f makes the override visible inside the given script's subshell.
-                        # shellcheck disable=SC1091
-                        source "${WORKSPACE}/pipeline/volume_shim.sh"
-                        export -f get_available_volume_id
 
                         "$SCRIPT"
 
