@@ -3,34 +3,35 @@
 // Implementation plan: docs/superpowers/plans/2026-08-13-jenkins-dbt-watsonx-pipeline.md
 
 pipeline {
-    agent { label 'linux' }
+    agent { label 'extension' }
 
     parameters {
         choice(name: 'DEPLOYMENT_FORM', choices: ['CPD', 'SAAS'], description: 'Target deployment platform')
         booleanParam(name: 'ENABLE_AUTHZ', defaultValue: true, description: 'Run with AuthZ enabled')
         booleanParam(name: 'SKIP_INFRA', defaultValue: false, description: 'True: skip catalog+engine creation, assume they exist (uses run_test.sh). False: full stack (uses run_catalog_tests.sh).')
+        // Connection parameters — entered at build time
+        string(name: 'WATSONX_HOSTNAME',    defaultValue: '', description: 'watsonx.data hostname or CPD base URL (e.g. https://cpd.example.com).')
+        string(name: 'WATSONX_APIKEY',      defaultValue: '', description: 'API key / CPD password.')
+        string(name: 'WATSONX_INSTANCE_ID', defaultValue: '', description: 'watsonx.data instance ID.')
+        string(name: 'CPD_USERNAME',        defaultValue: '', description: 'CPD login username (e.g. admin). Leave blank for SaaS.')
+        // Catalog parameters
         string(name: 'ICEBERG_CATALOG_NAME', defaultValue: 'iceberg_data', description: 'Iceberg catalog name. Required in v1 (only catalog with test coverage).')
-        string(name: 'HUDI_CATALOG_NAME', defaultValue: 'hudi_data', description: 'Hudi catalog name. Empty to skip Hudi.')
-        string(name: 'DELTA_CATALOG_NAME', defaultValue: 'delta_data', description: 'Delta catalog name. Empty to skip Delta.')
-        string(name: 'HIVE_CATALOG_NAME', defaultValue: '', description: 'Reserved for future. Ignored in v1.')
+        string(name: 'HUDI_CATALOG_NAME',    defaultValue: 'hudi_data',    description: 'Hudi catalog name. Empty to skip Hudi.')
+        string(name: 'DELTA_CATALOG_NAME',   defaultValue: 'delta_data',   description: 'Delta catalog name. Empty to skip Delta.')
+        string(name: 'HIVE_CATALOG_NAME',    defaultValue: '',             description: 'Reserved for future. Ignored in v1.')
         booleanParam(name: 'DELETE_CATALOG_AFTER_TEST', defaultValue: true, description: 'Delete/drop dynamic test catalogs post-execution')
         string(name: 'LAKEHOUSE_CONSOLE_VERSION', defaultValue: '2.2.x', description: 'Target watsonx.data Console version')
-        string(name: 'DBT_ADAPTER_BRANCH', defaultValue: 'main', description: 'Target branch/tag of dbt-watsonx-data')
-        string(name: 'ADAPTER_REPO_URL', defaultValue: 'https://github.com/roneymathew/dbt-watsonx-spark.git', description: '')
-        string(name: 'TIMEOUT_MINUTES', defaultValue: '90', description: 'Overall build timeout')
+        string(name: 'DBT_ADAPTER_BRANCH',   defaultValue: 'main', description: 'Target branch/tag of dbt-watsonx-data')
+        string(name: 'ADAPTER_REPO_URL',     defaultValue: 'https://github.com/roneymathew/dbt-watsonx-spark.git', description: '')
+        string(name: 'PIPELINE_REPO_URL',    defaultValue: '', description: 'URL of this pipeline repo (dbt-integration-pipeline). Required when running as Pipeline script (not from SCM).')
+        string(name: 'PIPELINE_REPO_BRANCH', defaultValue: 'main', description: 'Branch of the pipeline repo to check out.')
+        string(name: 'TIMEOUT_MINUTES',      defaultValue: '90', description: 'Overall build timeout')
     }
 
     options {
-        timeout(time: (params.TIMEOUT_MINUTES ?: '90').toInteger(), unit: 'MINUTES')
+        timeout(time: 90, unit: 'MINUTES')
         timestamps()
         buildDiscarder(logRotator(numToKeepStr: '30'))
-    }
-
-    environment {
-        WATSONX_HOSTNAME     = credentials('wx-host')
-        WATSONX_APIKEY       = credentials('wx-apikey')
-        WATSONX_INSTANCE_ID  = credentials('wx-instance-id')
-        CPD_USERNAME         = credentials('wx-username')
     }
 
     stages {
@@ -46,7 +47,41 @@ pipeline {
                     if (params.SKIP_INFRA && params.DEPLOYMENT_FORM == 'SAAS') {
                         error 'SKIP_INFRA=true is not supported with DEPLOYMENT_FORM=SAAS (run_test.sh is CPD-only).'
                     }
+                    if (!params.WATSONX_HOSTNAME?.trim()) {
+                        error 'WATSONX_HOSTNAME is required.'
+                    }
+                    if (!params.WATSONX_APIKEY?.toString()?.trim()) {
+                        error 'WATSONX_APIKEY is required.'
+                    }
+                    if (!params.WATSONX_INSTANCE_ID?.trim()) {
+                        error 'WATSONX_INSTANCE_ID is required.'
+                    }
                     echo "Params validated: deployment=${params.DEPLOYMENT_FORM}, authz=${params.ENABLE_AUTHZ}, skip_infra=${params.SKIP_INFRA}"
+                }
+            }
+        }
+        stage('Checkout pipeline repo') {
+            when {
+                // Only run when executing as a Pipeline script (not from SCM).
+                // When loaded from SCM the files are already in WORKSPACE.
+                expression { return params.PIPELINE_REPO_URL?.trim() as boolean }
+            }
+            steps {
+                withEnv([
+                    "PIPELINE_REPO=${params.PIPELINE_REPO_URL}",
+                    "PIPELINE_BRANCH=${params.PIPELINE_REPO_BRANCH}"
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        # Clone into a temp dir then copy pipeline/ and scripts/ into WORKSPACE.
+                        # Avoids clobbering anything Jenkins already placed in the root.
+                        TMPDIR=$(mktemp -d)
+                        git clone --depth 1 --branch "$PIPELINE_BRANCH" "$PIPELINE_REPO" "$TMPDIR"
+                        cp -rf "$TMPDIR/pipeline" "${WORKSPACE}/pipeline"
+                        cp -rf "$TMPDIR/scripts"  "${WORKSPACE}/scripts"
+                        rm -rf "$TMPDIR"
+                        echo "[pipeline-checkout] pipeline/ and scripts/ ready in ${WORKSPACE}"
+                    '''
                 }
             }
         }
@@ -89,6 +124,10 @@ pipeline {
         stage('Write .env') {
             steps {
                 withEnv([
+                    "WATSONX_HOSTNAME=${params.WATSONX_HOSTNAME}",
+                    "WATSONX_APIKEY=${params.WATSONX_APIKEY}",
+                    "WATSONX_INSTANCE_ID=${params.WATSONX_INSTANCE_ID}",
+                    "CPD_USERNAME=${params.CPD_USERNAME}",
                     "ICEBERG_CATALOG_NAME=${params.ICEBERG_CATALOG_NAME}",
                     "HUDI_CATALOG_NAME=${params.HUDI_CATALOG_NAME}",
                     "DELTA_CATALOG_NAME=${params.DELTA_CATALOG_NAME}"
@@ -105,6 +144,10 @@ pipeline {
         stage('Run given script (infra + Iceberg pytest)') {
             steps {
                 withEnv([
+                    "WATSONX_HOSTNAME=${params.WATSONX_HOSTNAME}",
+                    "WATSONX_APIKEY=${params.WATSONX_APIKEY}",
+                    "WATSONX_INSTANCE_ID=${params.WATSONX_INSTANCE_ID}",
+                    "CPD_USERNAME=${params.CPD_USERNAME}",
                     "SKIP_INFRA=${params.SKIP_INFRA}",
                     "ENABLE_AUTHZ=${params.ENABLE_AUTHZ}",
                     "ICEBERG_CATALOG_NAME=${params.ICEBERG_CATALOG_NAME}",
@@ -146,21 +189,18 @@ pipeline {
                         "$SCRIPT"
 
                         # --- record what this run created, for the post/always teardown ---
-                        # Look up the engine ID the given script just created/reused (same
-                        # jq lookup pattern as the per-catalog sweep stage below).
-                        AUTH_TOKEN=$(curl -s -k -X POST \\
-                            "${WATSONX_HOSTNAME}/icp4d-api/v1/authorize" \\
-                            -H "Content-Type: application/json" \\
-                            -d "{\\"username\\":\\"${CPD_USERNAME}\\",\\"api_key\\":\\"${WATSONX_APIKEY}\\"}" \\
+                        AUTH_TOKEN=$(curl -s -k -X POST \
+                            "${WATSONX_HOSTNAME}/icp4d-api/v1/authorize" \
+                            -H "Content-Type: application/json" \
+                            -d "{\"username\":\"${CPD_USERNAME}\",\"api_key\":\"${WATSONX_APIKEY}\"}" \
                             | jq -r .token)
 
-                        ENGINE_ID=$(curl -s -k -X GET \\
-                            "${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/spark_engines" \\
-                            -H "Authorization: Bearer ${AUTH_TOKEN}" \\
-                            -H "LhInstanceId: ${WATSONX_INSTANCE_ID}" \\
-                            | jq -r ".spark_engines[]? | select(.display_name==\\"${SPARK_ENGINE_NAME}\\") | .id // .engine_id" \\
+                        ENGINE_ID=$(curl -s -k -X GET \
+                            "${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/spark_engines" \
+                            -H "Authorization: Bearer ${AUTH_TOKEN}" \
+                            -H "LhInstanceId: ${WATSONX_INSTANCE_ID}" \
+                            | jq -r ".spark_engines[]? | select(.display_name==\"${SPARK_ENGINE_NAME}\") | .id // .engine_id" \
                             | head -n1)
-
                         if [ -n "$ENGINE_ID" ]; then
                             marker_record_engine "${WORKSPACE}/.pipeline-marker.json" "$ENGINE_ID"
                         else
@@ -188,6 +228,12 @@ pipeline {
         }
         stage('Per-catalog pytest sweep (Hudi/Delta)') {
             steps {
+                withEnv([
+                    "WATSONX_HOSTNAME=${params.WATSONX_HOSTNAME}",
+                    "WATSONX_APIKEY=${params.WATSONX_APIKEY}",
+                    "WATSONX_INSTANCE_ID=${params.WATSONX_INSTANCE_ID}",
+                    "CPD_USERNAME=${params.CPD_USERNAME}"
+                ]) {
                 script {
                     // === 3-part naming workaround ===
                     // Only Iceberg supports catalog.schema.table naming today.
@@ -235,26 +281,24 @@ pipeline {
                                     # shellcheck disable=SC1091
                                     source "${WORKSPACE}/.venv/bin/activate"
 
-                                    # Re-authenticate and look up the query server URI.
-                                    # (We don't source the given scripts because their main() runs on source.)
-                                    AUTH_TOKEN=$(curl -s -k -X POST \\
-                                        "${WATSONX_HOSTNAME}/icp4d-api/v1/authorize" \\
-                                        -H "Content-Type: application/json" \\
-                                        -d "{\\"username\\":\\"${CPD_USERNAME}\\",\\"api_key\\":\\"${WATSONX_APIKEY}\\"}" \\
+                                    AUTH_TOKEN=$(curl -s -k -X POST \
+                                        "${WATSONX_HOSTNAME}/icp4d-api/v1/authorize" \
+                                        -H "Content-Type: application/json" \
+                                        -d "{\"username\":\"${CPD_USERNAME}\",\"api_key\":\"${WATSONX_APIKEY}\"}" \
                                         | jq -r .token)
 
-                                    ENGINE_ID=$(curl -s -k -X GET \\
-                                        "${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/spark_engines" \\
-                                        -H "Authorization: Bearer ${AUTH_TOKEN}" \\
-                                        -H "LhInstanceId: ${WATSONX_INSTANCE_ID}" \\
-                                        | jq -r ".spark_engines[]? | select(.display_name==\\"${SPARK_ENGINE_NAME}\\") | .id // .engine_id" \\
+                                    ENGINE_ID=$(curl -s -k -X GET \
+                                        "${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/spark_engines" \
+                                        -H "Authorization: Bearer ${AUTH_TOKEN}" \
+                                        -H "LhInstanceId: ${WATSONX_INSTANCE_ID}" \
+                                        | jq -r ".spark_engines[]? | select(.display_name==\"${SPARK_ENGINE_NAME}\") | .id // .engine_id" \
                                         | head -n1)
 
-                                    QS_ID=$(curl -s -k -X GET \\
-                                        "${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/spark_engines/${ENGINE_ID}/query_servers" \\
-                                        -H "Authorization: Bearer ${AUTH_TOKEN}" \\
-                                        -H "LhInstanceId: ${WATSONX_INSTANCE_ID}" \\
-                                        | jq -r ".query_servers[]? | select(.query_server_details.name==\\"${QS_NAME}\\") | .id" \\
+                                    QS_ID=$(curl -s -k -X GET \
+                                        "${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/spark_engines/${ENGINE_ID}/query_servers" \
+                                        -H "Authorization: Bearer ${AUTH_TOKEN}" \
+                                        -H "LhInstanceId: ${WATSONX_INSTANCE_ID}" \
+                                        | jq -r ".query_servers[]? | select(.query_server_details.name==\"${QS_NAME}\") | .id" \
                                         | head -n1)
 
                                     export WATSONX_URI="/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/spark_engines/${ENGINE_ID}/query_servers/${QS_ID}/connect/cliservice"
@@ -273,6 +317,7 @@ pipeline {
                         }
                     }
                 }
+                } // withEnv
             }
         }
         stage('Report') {
@@ -293,19 +338,24 @@ pipeline {
 
     post {
         always {
-            script {
-                withEnv(["DELETE_CATALOG_AFTER_TEST=${params.DELETE_CATALOG_AFTER_TEST}"]) {
+            node('extension') {
+                withEnv([
+                    "WATSONX_HOSTNAME=${params.WATSONX_HOSTNAME}",
+                    "WATSONX_APIKEY=${params.WATSONX_APIKEY}",
+                    "WATSONX_INSTANCE_ID=${params.WATSONX_INSTANCE_ID}",
+                    "CPD_USERNAME=${params.CPD_USERNAME}",
+                    "DELETE_CATALOG_AFTER_TEST=${params.DELETE_CATALOG_AFTER_TEST}"
+                ]) {
                     sh '''
                         set +e
                         set +x
                         export HOME="${WORKSPACE}/.home"
 
                         if [ -f "${WORKSPACE}/.pipeline-marker.json" ]; then
-                            # Get auth token
-                            AUTH_TOKEN=$(curl -s -k -X POST \\
-                                "${WATSONX_HOSTNAME}/icp4d-api/v1/authorize" \\
-                                -H "Content-Type: application/json" \\
-                                -d "{\\"username\\":\\"${CPD_USERNAME}\\",\\"api_key\\":\\"${WATSONX_APIKEY}\\"}" \\
+                            AUTH_TOKEN=$(curl -s -k -X POST \
+                                "${WATSONX_HOSTNAME}/icp4d-api/v1/authorize" \
+                                -H "Content-Type: application/json" \
+                                -d "{\"username\":\"${CPD_USERNAME}\",\"api_key\":\"${WATSONX_APIKEY}\"}" \
                                 | jq -r .token)
                             export AUTH_TOKEN
                             export LAKEHOUSE_API_VERSION="v3"
@@ -323,9 +373,9 @@ pipeline {
                             ENGINE_ID=$(marker_get_engine_id "${WORKSPACE}/.pipeline-marker.json")
                             if [ -n "$ENGINE_ID" ]; then
                                 echo "[teardown] deleting Spark engine $ENGINE_ID"
-                                curl -s -k -X DELETE \\
-                                    "${WATSONX_HOSTNAME}/lakehouse/api/${LAKEHOUSE_API_VERSION}/${WATSONX_INSTANCE_ID}/spark_engines/${ENGINE_ID}" \\
-                                    -H "Authorization: Bearer ${AUTH_TOKEN}" \\
+                                curl -s -k -X DELETE \
+                                    "${WATSONX_HOSTNAME}/lakehouse/api/${LAKEHOUSE_API_VERSION}/${WATSONX_INSTANCE_ID}/spark_engines/${ENGINE_ID}" \
+                                    -H "Authorization: Bearer ${AUTH_TOKEN}" \
                                     -H "LhInstanceId: ${WATSONX_INSTANCE_ID}" || true
                             fi
                         else
@@ -333,12 +383,12 @@ pipeline {
                         fi
 
                         # Workspace purge
-                        rm -rf "${WORKSPACE}/.venv" "${WORKSPACE}/.home" \\
-                               "${WORKSPACE}/adapter/.env" "${WORKSPACE}/.env" \\
+                        rm -rf "${WORKSPACE}/.venv" "${WORKSPACE}/.home" \
+                               "${WORKSPACE}/adapter/.env" "${WORKSPACE}/.env" \
                                "${WORKSPACE}/adapter" "${WORKSPACE}/.pipeline-marker.json"
                     '''
                 }
-            }
+            } // node
         }
     }
 }
