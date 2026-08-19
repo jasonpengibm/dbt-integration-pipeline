@@ -218,6 +218,18 @@ pipeline {
                         cp -f "${WORKSPACE}/scripts/run_catalog_tests.sh" "${WORKSPACE}/adapter/scripts/run_catalog_tests.sh"
                         chmod +x "${WORKSPACE}/adapter/scripts/"*.sh
 
+                        # Patch the working copy of run_catalog_tests.sh: inject the volume shim
+                        # source line immediately BEFORE the "main "$@"" call at the bottom.
+                        # The shim redefines get_available_volume_id — since it is sourced after
+                        # the original definition but before main() executes, bash uses the shim.
+                        # Idempotent: skips if already patched.
+                        SHIM_PATH="${WORKSPACE}/pipeline/volume_shim.sh"
+                        SCRIPT_COPY="${WORKSPACE}/adapter/scripts/run_catalog_tests.sh"
+                        if ! grep -q 'volume_shim.sh' "$SCRIPT_COPY"; then
+                            sed -i "s|^# Run main function\$|# volume shim — injected by pipeline (overrides get_available_volume_id)\nsource \"${SHIM_PATH}\"\n\n# Run main function|" "$SCRIPT_COPY"
+                            echo "[patch] injected volume_shim.sh before main() call in run_catalog_tests.sh"
+                        fi
+
                         # Re-read the token written by Write .env (avoids re-authing).
                         AUTH_TOKEN=$(grep '^AUTH_TOKEN=' "${WORKSPACE}/adapter/.env" | cut -d= -f2-)
                         export AUTH_TOKEN
