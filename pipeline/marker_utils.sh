@@ -7,17 +7,20 @@ marker_init() {
     local run_id=$2
     jq -n \
         --arg run_id "$run_id" \
-        '{run_id: $run_id, engine_id: "", engine_created_by_this_run: false, catalogs_created: [], catalogs_reused: []}' \
+        '{run_id: $run_id, engine_ids: [], catalogs_created: [], catalogs_reused: []}' \
         > "$marker_path"
 }
 
+# Append an engine id to the marker. The given run_catalog_tests.sh always creates
+# both a standard and an authz engine per run, so we may call this more than once.
 marker_record_engine() {
     local marker_path=$1
     local engine_id=$2
+    [[ -z "$engine_id" ]] && return 0
     local tmp
     tmp=$(mktemp)
     if ! jq --arg eid "$engine_id" \
-        '.engine_id = $eid | .engine_created_by_this_run = true' \
+        '.engine_ids |= (. + [$eid] | unique)' \
         "$marker_path" > "$tmp"; then
         rm -f "$tmp"
         return 1
@@ -54,7 +57,13 @@ marker_get_catalogs_created() {
     jq -r '.catalogs_created[]' "$marker_path"
 }
 
-marker_get_engine_id() {
+marker_get_engine_ids() {
     local marker_path=$1
-    jq -r '.engine_id // ""' "$marker_path"
+    jq -r '.engine_ids[]?' "$marker_path"
+}
+
+marker_has_catalog_reused() {
+    local marker_path=$1
+    local catalog=$2
+    jq -e --arg c "$catalog" '.catalogs_reused | index($c)' "$marker_path" >/dev/null 2>&1
 }

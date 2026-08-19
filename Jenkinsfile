@@ -12,7 +12,7 @@ pipeline {
         // Connection parameters — entered at build time
         string(name: 'WATSONX_HOSTNAME',    defaultValue: '', description: 'watsonx.data hostname or CPD base URL (e.g. https://cpd.example.com).')
         string(name: 'CPD_USERNAME',        defaultValue: '', description: 'CPD login username (e.g. cpadmin). Leave blank for SaaS.')
-        string(name: 'CPD_PASSWORD',        defaultValue: '', description: 'CPD login password. The pipeline exchanges this for a bearer token before calling the given scripts.')
+        password(name: 'CPD_PASSWORD',      defaultValue: '', description: 'CPD login password. The pipeline exchanges this for a bearer token before calling the given scripts. Masked in console output.')
         string(name: 'WATSONX_INSTANCE_ID', defaultValue: '', description: 'watsonx.data instance ID.')
         // Catalog parameters
         string(name: 'ICEBERG_CATALOG_NAME', defaultValue: 'iceberg_data', description: 'Iceberg catalog name. Required in v1 (only catalog with test coverage).')
@@ -21,10 +21,14 @@ pipeline {
         string(name: 'HIVE_CATALOG_NAME',    defaultValue: '',             description: 'Reserved for future. Ignored in v1.')
         booleanParam(name: 'DELETE_CATALOG_AFTER_TEST', defaultValue: true, description: 'Delete/drop dynamic test catalogs post-execution')
         // S3/COS storage credentials — the only values that cannot be auto-discovered from the cluster.
-        // Bucket names and region are derived automatically from catalog names.
         string(name: 'STORAGE_ENDPOINT',   defaultValue: '', description: 'S3-compatible storage endpoint URL (e.g. https://s3.us-south.cloud-object-storage.appdomain.cloud).')
-        string(name: 'STORAGE_ACCESS_KEY', defaultValue: '', description: 'S3 HMAC access key.')
-        string(name: 'STORAGE_SECRET_KEY', defaultValue: '', description: 'S3 HMAC secret key.')
+        password(name: 'STORAGE_ACCESS_KEY', defaultValue: '', description: 'S3 HMAC access key. Masked in console output.')
+        password(name: 'STORAGE_SECRET_KEY', defaultValue: '', description: 'S3 HMAC secret key. Masked in console output.')
+        // Bucket-name overrides. Leave blank to derive from catalog name (<catalog>-bucket, underscores→hyphens).
+        // Set explicitly when your COS instance's buckets don't match the derived name.
+        string(name: 'ICEBERG_BUCKET_NAME', defaultValue: '', description: 'Iceberg bucket name (default: derived from ICEBERG_CATALOG_NAME).')
+        string(name: 'HUDI_BUCKET_NAME',    defaultValue: '', description: 'Hudi bucket name (default: derived from HUDI_CATALOG_NAME).')
+        string(name: 'DELTA_BUCKET_NAME',   defaultValue: '', description: 'Delta bucket name (default: derived from DELTA_CATALOG_NAME).')
         string(name: 'LAKEHOUSE_CONSOLE_VERSION', defaultValue: '2.2.x', description: 'Target watsonx.data Console version')
         string(name: 'DBT_ADAPTER_BRANCH',   defaultValue: 'main', description: 'Target branch/tag of dbt-watsonx-data')
         string(name: 'ADAPTER_REPO_URL',     defaultValue: 'https://github.com/roneymathew/dbt-watsonx-spark.git', description: '')
@@ -81,10 +85,14 @@ pipeline {
         stage('Prepare workspace') {
             steps {
                 script {
-                    // BUILD_TAG_SHORT: strip 'jenkins-' prefix, keep it URL-safe
-                    def shortTag = env.BUILD_TAG.replaceAll('[^A-Za-z0-9-]', '-').take(32)
-                    def authzMode = params.ENABLE_AUTHZ ? 'authz' : 'std'
-                    env.SPARK_ENGINE_NAME = "spark-dbt-${shortTag}-${params.DEPLOYMENT_FORM.toLowerCase()}-${authzMode}"
+                    // BUILD_TAG_SHORT: strip 'jenkins-' prefix, keep it URL-safe.
+                    // SPARK_ENGINE_NAME is the *base* — run_catalog_tests.sh always
+                    // creates two engines per run: ${base} (standard) and ${base}-authz.
+                    // Do NOT bake an authz/std suffix into the base or the script's
+                    // derivation will produce ${base}-authz-authz for the second one.
+                    def shortTag = env.BUILD_TAG.replaceAll('[^A-Za-z0-9-]', '-').take(24)
+                    env.SPARK_ENGINE_NAME = "spark-dbt-${shortTag}-${params.DEPLOYMENT_FORM.toLowerCase()}"
+                    env.SPARK_ENGINE_AUTHZ_NAME = "${env.SPARK_ENGINE_NAME}-authz"
                     env.DEPLOYMENT_TYPE = params.DEPLOYMENT_FORM.toLowerCase()
                     env.PYTHON_VENV_PATH = "${env.WORKSPACE}/.venv"
                 }
@@ -114,7 +122,10 @@ pipeline {
                     "DELTA_CATALOG_NAME=${params.DELTA_CATALOG_NAME}",
                     "STORAGE_ENDPOINT=${params.STORAGE_ENDPOINT}",
                     "STORAGE_ACCESS_KEY=${params.STORAGE_ACCESS_KEY}",
-                    "STORAGE_SECRET_KEY=${params.STORAGE_SECRET_KEY}"
+                    "STORAGE_SECRET_KEY=${params.STORAGE_SECRET_KEY}",
+                    "ICEBERG_BUCKET_OVERRIDE=${params.ICEBERG_BUCKET_NAME}",
+                    "HUDI_BUCKET_OVERRIDE=${params.HUDI_BUCKET_NAME}",
+                    "DELTA_BUCKET_OVERRIDE=${params.DELTA_BUCKET_NAME}"
                 ]) {
                     sh '''
                         set -euo pipefail
@@ -256,7 +267,32 @@ pipeline {
                         # Initialize marker
                         # shellcheck disable=SC1091
                         source "${WORKSPACE}/pipeline/marker_utils.sh"
-                        marker_init "${WORKSPACE}/.pipeline-marker.json" "${BUILD_TAG}"
+                        MARKER="${WORKSPACE}/.pipeline-marker.json"
+                        marker_init "$MARKER" "${BUILD_TAG}"
+
+                        # --- preflight: record any catalog that ALREADY exists as `_reused` ---
+                        # cleanup_catalogs.sh only deletes catalogs in `_created`, so anything
+                        # marked reused here is safe from teardown. This protects shared
+                        # baseline catalogs from a previous manual setup or a shared instance.
+                        preflight_catalog() {
+                            local catalog_name=$1
+                            [ -z "$catalog_name" ] && return 0
+                            local http
+                            http=$(curl -s -k -o /dev/null -w "%{http_code}" -X GET \
+                                "${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/catalogs/${catalog_name}" \
+                                -H "Authorization: Bearer ${AUTH_TOKEN}" \
+                                -H "LhInstanceId: ${WATSONX_INSTANCE_ID}" \
+                                -H "AuthInstanceId: ${WATSONX_INSTANCE_ID}")
+                            if [ "$http" = "200" ]; then
+                                marker_record_catalog_reused "$MARKER" "$catalog_name"
+                                echo "[preflight] catalog '$catalog_name' already exists — will preserve on teardown"
+                            else
+                                echo "[preflight] catalog '$catalog_name' not found (HTTP $http) — will treat as created-by-this-run"
+                            fi
+                        }
+                        preflight_catalog "$ICEBERG_CATALOG_NAME"
+                        preflight_catalog "$HUDI_CATALOG_NAME"
+                        preflight_catalog "$DELTA_CATALOG_NAME"
 
                         # Activate venv and cd to adapter root
                         # shellcheck disable=SC1091
@@ -280,28 +316,41 @@ pipeline {
                         # Re-use the already-obtained token (still valid within the run).
                         AUTH_TOKEN=$(grep '^AUTH_TOKEN=' "${WORKSPACE}/adapter/.env" | cut -d= -f2-)
 
-                        ENGINE_ID=$(curl -s -k -X GET \
+                        # run_catalog_tests.sh creates BOTH the standard engine and the
+                        # ${base}-authz engine on every run. Record both so post/always
+                        # deletes both — otherwise the second one leaks.
+                        SPARK_ENGINES_JSON=$(curl -s -k -X GET \
                             "${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/spark_engines" \
                             -H "Authorization: Bearer ${AUTH_TOKEN}" \
-                            -H "LhInstanceId: ${WATSONX_INSTANCE_ID}" \
-                            | jq -r ".spark_engines[]? | select(.display_name==\"${SPARK_ENGINE_NAME}\") | .id // .engine_id" \
-                            | head -n1)
-                        if [ -n "$ENGINE_ID" ]; then
-                            marker_record_engine "${WORKSPACE}/.pipeline-marker.json" "$ENGINE_ID"
-                        else
-                            echo "[marker] warn: could not resolve engine id for ${SPARK_ENGINE_NAME}; teardown will not delete the engine" >&2
-                        fi
+                            -H "LhInstanceId: ${WATSONX_INSTANCE_ID}")
+                        for engine_display in "$SPARK_ENGINE_NAME" "$SPARK_ENGINE_AUTHZ_NAME"; do
+                            EID=$(echo "$SPARK_ENGINES_JSON" \
+                                | jq -r --arg n "$engine_display" \
+                                    '.spark_engines[]? | select(.display_name==$n) | .id // .engine_id' \
+                                | head -n1)
+                            if [ -n "$EID" ]; then
+                                marker_record_engine "${WORKSPACE}/.pipeline-marker.json" "$EID"
+                                echo "[marker] recorded engine ${engine_display} (id=$EID)"
+                            else
+                                echo "[marker] warn: engine ${engine_display} not found; teardown will not delete it" >&2
+                            fi
+                        done
 
-                        # SKIP_INFRA=true means run_test.sh assumes the catalogs already
-                        # exist (it does not create them) — mark them reused so cleanup
-                        # never deletes catalogs this run didn't create.
+                        # SKIP_INFRA=true means run_test.sh assumes catalogs already exist
+                        # (it does not create them) — mark them reused so cleanup never
+                        # deletes catalogs this run didn't create. Otherwise, anything the
+                        # preflight already flagged as reused stays reused; the rest is
+                        # attributed to this run.
                         record_catalog() {
                             local catalog_name=$1
                             [ -z "$catalog_name" ] && return 0
+                            if marker_has_catalog_reused "$MARKER" "$catalog_name"; then
+                                return 0
+                            fi
                             if [ "$SKIP_INFRA" = "true" ]; then
-                                marker_record_catalog_reused "${WORKSPACE}/.pipeline-marker.json" "$catalog_name"
+                                marker_record_catalog_reused "$MARKER" "$catalog_name"
                             else
-                                marker_record_catalog_created "${WORKSPACE}/.pipeline-marker.json" "$catalog_name"
+                                marker_record_catalog_created "$MARKER" "$catalog_name"
                             fi
                         }
                         record_catalog "$ICEBERG_CATALOG_NAME"
@@ -336,6 +385,9 @@ pipeline {
 
                     def profileName = params.ENABLE_AUTHZ ? 'watsonx_authz_test' : 'watsonx_test'
                     def qsName = params.ENABLE_AUTHZ ? 'dbt-authz-qs' : 'dbt-standard-qs'
+                    // Route to the right engine — the given script creates both, but a run
+                    // exercises one at a time based on ENABLE_AUTHZ.
+                    def targetEngineDisplay = params.ENABLE_AUTHZ ? env.SPARK_ENGINE_AUTHZ_NAME : env.SPARK_ENGINE_NAME
 
                     def rounds = [
                         [type: 'hudi',  name: params.HUDI_CATALOG_NAME],
@@ -357,7 +409,8 @@ pipeline {
                                 "CATALOG_TYPE=${catalogType}",
                                 "CATALOG_NAME=${catalogName}",
                                 "EFFECTIVE_CATALOG=${effective}",
-                                "PROFILE_NAME=${profileName}"
+                                "PROFILE_NAME=${profileName}",
+                                "TARGET_ENGINE_DISPLAY=${targetEngineDisplay}"
                             ]) {
                                 sh '''
                                     set -euo pipefail
@@ -377,7 +430,8 @@ pipeline {
                                         "${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/spark_engines" \
                                         -H "Authorization: Bearer ${AUTH_TOKEN}" \
                                         -H "LhInstanceId: ${WATSONX_INSTANCE_ID}" \
-                                        | jq -r ".spark_engines[]? | select(.display_name==\"${SPARK_ENGINE_NAME}\") | .id // .engine_id" \
+                                        | jq -r --arg n "${TARGET_ENGINE_DISPLAY}" \
+                                            '.spark_engines[]? | select(.display_name==$n) | .id // .engine_id' \
                                         | head -n1)
 
                                     QS_ID=$(curl -s -k -X GET \
@@ -454,17 +508,19 @@ pipeline {
                                 echo "[teardown] DELETE_CATALOG_AFTER_TEST=false; leaving catalogs in place"
                             fi
 
-                            # Delete this build's Spark engine unconditionally (unique-named per build).
+                            # Delete this build's Spark engines unconditionally (unique-named per build).
+                            # run_catalog_tests.sh creates both a standard and an authz engine, so
+                            # the marker holds a list — iterate all recorded ids.
                             # shellcheck disable=SC1091
                             source "${WORKSPACE}/pipeline/marker_utils.sh"
-                            ENGINE_ID=$(marker_get_engine_id "${WORKSPACE}/.pipeline-marker.json")
-                            if [ -n "$ENGINE_ID" ]; then
+                            while IFS= read -r ENGINE_ID; do
+                                [ -z "$ENGINE_ID" ] && continue
                                 echo "[teardown] deleting Spark engine $ENGINE_ID"
                                 curl -s -k -X DELETE \
                                     "${WATSONX_HOSTNAME}/lakehouse/api/${LAKEHOUSE_API_VERSION}/${WATSONX_INSTANCE_ID}/spark_engines/${ENGINE_ID}" \
                                     -H "Authorization: Bearer ${AUTH_TOKEN}" \
                                     -H "LhInstanceId: ${WATSONX_INSTANCE_ID}" || true
-                            fi
+                            done < <(marker_get_engine_ids "${WORKSPACE}/.pipeline-marker.json")
                         else
                             echo "[teardown] no marker file; nothing to clean up"
                         fi

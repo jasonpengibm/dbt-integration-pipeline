@@ -63,10 +63,11 @@ umask 077
     echo "STORAGE_ACCESS_KEY=${STORAGE_ACCESS_KEY:-}"
     echo "STORAGE_SECRET_KEY=${STORAGE_SECRET_KEY:-}"
     echo "STORAGE_REGION=us-south"
-    # Bucket names derived from catalog names: <catalog_name>-bucket (hyphens replace underscores)
-    echo "ICEBERG_BUCKET=$(echo "${ICEBERG_CATALOG_NAME:-iceberg_data}" | tr '_' '-')-bucket"
-    echo "DELTA_BUCKET=$(echo "${DELTA_CATALOG_NAME:-delta_data}" | tr '_' '-')-bucket"
-    echo "HUDI_BUCKET=$(echo "${HUDI_CATALOG_NAME:-hudi_data}" | tr '_' '-')-bucket"
+    # Bucket names: use *_BUCKET_OVERRIDE if the pipeline supplied one, otherwise
+    # derive from catalog name: <catalog_name>-bucket (hyphens replace underscores).
+    echo "ICEBERG_BUCKET=${ICEBERG_BUCKET_OVERRIDE:-$(echo "${ICEBERG_CATALOG_NAME:-iceberg_data}" | tr '_' '-')-bucket}"
+    echo "DELTA_BUCKET=${DELTA_BUCKET_OVERRIDE:-$(echo "${DELTA_CATALOG_NAME:-delta_data}" | tr '_' '-')-bucket}"
+    echo "HUDI_BUCKET=${HUDI_BUCKET_OVERRIDE:-$(echo "${HUDI_CATALOG_NAME:-hudi_data}" | tr '_' '-')-bucket}"
     # Volume name for Spark engine home (volume ID is resolved and appended by the pipeline after this script)
     echo "SPARK_ENGINE_VOLUME_NAME=spark-engine-volume"
 } > "$OUTPUT_PATH"

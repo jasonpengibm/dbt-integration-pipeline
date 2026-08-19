@@ -50,24 +50,26 @@ cleanup_catalogs() {
     fi
 
     # marker_utils functions may already be sourced; if not, source them
-    if ! declare -F marker_get_engine_id >/dev/null 2>&1; then
+    if ! declare -F marker_get_engine_ids >/dev/null 2>&1; then
         # shellcheck source=pipeline/marker_utils.sh
         source "$(dirname "${BASH_SOURCE[0]}")/marker_utils.sh"
     fi
 
-    local engine_id
-    engine_id=$(marker_get_engine_id "$marker_path")
+    local engine_ids=()
+    while IFS= read -r eid; do
+        [[ -n "$eid" ]] && engine_ids+=("$eid")
+    done < <(marker_get_engine_ids "$marker_path")
 
-    if [[ -z "$engine_id" ]]; then
-        echo "[cleanup] no engine recorded, nothing to disassociate" >&2
+    if [[ ${#engine_ids[@]} -eq 0 ]]; then
+        echo "[cleanup] no engines recorded, nothing to disassociate" >&2
     fi
 
     while IFS= read -r catalog; do
         [[ -z "$catalog" ]] && continue
-        if [[ -n "$engine_id" ]]; then
+        for engine_id in "${engine_ids[@]}"; do
             _disassociate_catalog "$engine_id" "$catalog" || \
-                echo "[cleanup] warn: disassociate failed for $catalog (continuing)" >&2
-        fi
+                echo "[cleanup] warn: disassociate failed for $catalog on $engine_id (continuing)" >&2
+        done
         _delete_catalog "$catalog" || \
             echo "[cleanup] warn: delete failed for $catalog (continuing)" >&2
     done < <(marker_get_catalogs_created "$marker_path")
