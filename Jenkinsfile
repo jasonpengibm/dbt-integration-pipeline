@@ -243,6 +243,7 @@ pipeline {
                                 }
                             ' "$SCRIPT_COPY" > "${SCRIPT_COPY}.new"
                             mv "${SCRIPT_COPY}.new" "$SCRIPT_COPY"
+                            chmod +x "$SCRIPT_COPY"
                             echo "[patch] injected volume_shim.sh before main() call"
                         fi
 
