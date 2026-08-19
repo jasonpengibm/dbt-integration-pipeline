@@ -12,7 +12,7 @@ pipeline {
         // Connection parameters — entered at build time
         string(name: 'WATSONX_HOSTNAME',    defaultValue: '', description: 'watsonx.data hostname or CPD base URL (e.g. https://cpd.example.com).')
         string(name: 'CPD_USERNAME',        defaultValue: '', description: 'CPD login username (e.g. cpadmin). Leave blank for SaaS.')
-        password(name: 'CPD_PASSWORD',      defaultValue: '', description: 'CPD login password. The pipeline exchanges this for a bearer token before calling the given scripts. Masked in console output.')
+        string(name: 'CPD_PASSWORD',        defaultValue: '', description: 'CPD login password. The pipeline exchanges this for a bearer token before calling the given scripts.')
         string(name: 'WATSONX_INSTANCE_ID', defaultValue: '', description: 'watsonx.data instance ID.')
         // Catalog parameters
         string(name: 'ICEBERG_CATALOG_NAME', defaultValue: 'iceberg_data', description: 'Iceberg catalog name. Required in v1 (only catalog with test coverage).')
@@ -22,8 +22,8 @@ pipeline {
         booleanParam(name: 'DELETE_CATALOG_AFTER_TEST', defaultValue: true, description: 'Delete/drop dynamic test catalogs post-execution')
         // S3/COS storage credentials — the only values that cannot be auto-discovered from the cluster.
         string(name: 'STORAGE_ENDPOINT',   defaultValue: '', description: 'S3-compatible storage endpoint URL (e.g. https://s3.us-south.cloud-object-storage.appdomain.cloud).')
-        password(name: 'STORAGE_ACCESS_KEY', defaultValue: '', description: 'S3 HMAC access key. Masked in console output.')
-        password(name: 'STORAGE_SECRET_KEY', defaultValue: '', description: 'S3 HMAC secret key. Masked in console output.')
+        string(name: 'STORAGE_ACCESS_KEY', defaultValue: '', description: 'S3 HMAC access key.')
+        string(name: 'STORAGE_SECRET_KEY', defaultValue: '', description: 'S3 HMAC secret key.')
         // Bucket-name overrides. Leave blank to derive from catalog name (<catalog>-bucket, underscores→hyphens).
         // Set explicitly when your COS instance's buckets don't match the derived name.
         string(name: 'ICEBERG_BUCKET_NAME', defaultValue: '', description: 'Iceberg bucket name (default: derived from ICEBERG_CATALOG_NAME).')
@@ -45,17 +45,6 @@ pipeline {
         stage('Validate params') {
             steps {
                 script {
-                    // password() params return hudson.util.Secret, not String. Two consequences:
-                    //   1. calling .trim() / other String methods throws MissingMethodException
-                    //   2. interpolating them into a GString (e.g. "K=${params.SECRET}") triggers
-                    //      Jenkins' "secret passed via Groovy String interpolation" warning
-                    // Resolve to plaintext once here, stash on env.*, and let downstream sh steps
-                    // inherit them directly. The plaintext value is still registered with the
-                    // log-masker so it is redacted anywhere it appears in console output.
-                    env.CPD_PASSWORD = (params.CPD_PASSWORD?.plainText ?: '')
-                    env.STORAGE_ACCESS_KEY = (params.STORAGE_ACCESS_KEY?.plainText ?: '')
-                    env.STORAGE_SECRET_KEY = (params.STORAGE_SECRET_KEY?.plainText ?: '')
-
                     if (!params.ICEBERG_CATALOG_NAME?.trim()) {
                         error 'ICEBERG_CATALOG_NAME is required in v1 (Iceberg is the only catalog with test coverage; HUDI/DELTA may be empty to skip).'
                     }
@@ -71,7 +60,7 @@ pipeline {
                     if (!params.CPD_USERNAME?.trim()) {
                         error 'CPD_USERNAME is required.'
                     }
-                    if (!env.CPD_PASSWORD?.trim()) {
+                    if (!params.CPD_PASSWORD?.trim()) {
                         error 'CPD_PASSWORD is required.'
                     }
                     if (!params.WATSONX_INSTANCE_ID?.trim()) {
@@ -123,17 +112,17 @@ pipeline {
         }
         stage('Write .env') {
             steps {
-                // Secret params (CPD_PASSWORD / STORAGE_ACCESS_KEY / STORAGE_SECRET_KEY) are
-                // already set on env.* via Validate params and inherited by sh — do not
-                // interpolate them into GStrings here.
                 withEnv([
                     "WATSONX_HOSTNAME=${params.WATSONX_HOSTNAME}",
                     "WATSONX_INSTANCE_ID=${params.WATSONX_INSTANCE_ID}",
                     "CPD_USERNAME=${params.CPD_USERNAME}",
+                    "CPD_PASSWORD=${params.CPD_PASSWORD}",
                     "ICEBERG_CATALOG_NAME=${params.ICEBERG_CATALOG_NAME}",
                     "HUDI_CATALOG_NAME=${params.HUDI_CATALOG_NAME}",
                     "DELTA_CATALOG_NAME=${params.DELTA_CATALOG_NAME}",
                     "STORAGE_ENDPOINT=${params.STORAGE_ENDPOINT}",
+                    "STORAGE_ACCESS_KEY=${params.STORAGE_ACCESS_KEY}",
+                    "STORAGE_SECRET_KEY=${params.STORAGE_SECRET_KEY}",
                     "ICEBERG_BUCKET_OVERRIDE=${params.ICEBERG_BUCKET_NAME}",
                     "HUDI_BUCKET_OVERRIDE=${params.HUDI_BUCKET_NAME}",
                     "DELTA_BUCKET_OVERRIDE=${params.DELTA_BUCKET_NAME}"
@@ -222,6 +211,7 @@ pipeline {
                     "WATSONX_HOSTNAME=${params.WATSONX_HOSTNAME}",
                     "WATSONX_INSTANCE_ID=${params.WATSONX_INSTANCE_ID}",
                     "CPD_USERNAME=${params.CPD_USERNAME}",
+                    "CPD_PASSWORD=${params.CPD_PASSWORD}",
                     "SKIP_INFRA=${params.SKIP_INFRA}",
                     "ENABLE_AUTHZ=${params.ENABLE_AUTHZ}",
                     "ICEBERG_CATALOG_NAME=${params.ICEBERG_CATALOG_NAME}",
@@ -375,7 +365,8 @@ pipeline {
                 withEnv([
                     "WATSONX_HOSTNAME=${params.WATSONX_HOSTNAME}",
                     "WATSONX_INSTANCE_ID=${params.WATSONX_INSTANCE_ID}",
-                    "CPD_USERNAME=${params.CPD_USERNAME}"
+                    "CPD_USERNAME=${params.CPD_USERNAME}",
+                    "CPD_PASSWORD=${params.CPD_PASSWORD}"
                 ]) {
                 script {
                     // === 3-part naming workaround ===
@@ -492,6 +483,7 @@ pipeline {
                     "WATSONX_HOSTNAME=${params.WATSONX_HOSTNAME}",
                     "WATSONX_INSTANCE_ID=${params.WATSONX_INSTANCE_ID}",
                     "CPD_USERNAME=${params.CPD_USERNAME}",
+                    "CPD_PASSWORD=${params.CPD_PASSWORD}",
                     "DELETE_CATALOG_AFTER_TEST=${params.DELETE_CATALOG_AFTER_TEST}"
                 ]) {
                     sh '''
