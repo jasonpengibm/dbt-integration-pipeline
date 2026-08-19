@@ -143,16 +143,26 @@ pipeline {
                         # Exchange username+password for a CPD bearer token.
                         # Both given scripts check: if [ -n "$AUTH_TOKEN" ]; skip own auth.
                         # Using "password" field (not "api_key") for password-based login.
-                        AUTH_TOKEN=$(curl -s -k -X POST \
-                            "${WATSONX_HOSTNAME}/icp4d-api/v1/authorize" \
+                        AUTH_URL="${WATSONX_HOSTNAME}/icp4d-api/v1/authorize"
+                        echo "[auth] POST ${AUTH_URL} (username=${CPD_USERNAME})"
+
+                        HTTP_STATUS=$(curl -s -k -o /tmp/_auth_resp.json -w "%{http_code}" \
+                            -X POST "${AUTH_URL}" \
                             -H "Content-Type: application/json" \
-                            -d "{\"username\":\"${CPD_USERNAME}\",\"password\":\"${CPD_PASSWORD}\"}" \
-                            | jq -r '.token // empty')
+                            -d "{\"username\":\"${CPD_USERNAME}\",\"password\":\"${CPD_PASSWORD}\"}")
+
+                        echo "[auth] HTTP status: ${HTTP_STATUS}"
+                        # Print response but mask any token value for log safety
+                        sed 's/"token":"[^"]*"/"token":"<REDACTED>"/g' /tmp/_auth_resp.json || true
+
+                        AUTH_TOKEN=$(jq -r '.token // empty' /tmp/_auth_resp.json)
+                        rm -f /tmp/_auth_resp.json
+
                         if [ -z "$AUTH_TOKEN" ]; then
-                            echo "[auth] ERROR: CPD authentication failed. Check WATSONX_HOSTNAME, CPD_USERNAME, CPD_PASSWORD." >&2
+                            echo "[auth] ERROR: CPD authentication failed (HTTP ${HTTP_STATUS}). Check WATSONX_HOSTNAME, CPD_USERNAME, CPD_PASSWORD." >&2
                             exit 1
                         fi
-                        echo "[auth] CPD token obtained successfully."
+                        echo "[auth] CPD token obtained successfully (HTTP ${HTTP_STATUS})."
                         export AUTH_TOKEN
 
                         # WATSONX_APIKEY is expected by write_env.sh and the given scripts
