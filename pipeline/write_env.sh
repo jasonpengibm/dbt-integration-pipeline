@@ -58,17 +58,17 @@ umask 077
     echo "SPARK_ENGINE_AUTHZ_NAME=${SPARK_ENGINE_NAME}-authz"
     echo "PYTHON_VENV_PATH=$PYTHON_VENV_PATH"
     echo "LAKEHOUSE_API_VERSION=$LAKEHOUSE_API_VERSION"
-    # S3/COS storage (required by run_catalog_tests.sh for CPD catalog creation)
+    # S3/COS storage credentials (passed from pipeline params — cannot be auto-discovered)
     echo "STORAGE_ENDPOINT=${STORAGE_ENDPOINT:-}"
     echo "STORAGE_ACCESS_KEY=${STORAGE_ACCESS_KEY:-}"
     echo "STORAGE_SECRET_KEY=${STORAGE_SECRET_KEY:-}"
-    echo "STORAGE_REGION=${STORAGE_REGION:-us-south}"
-    echo "ICEBERG_BUCKET=${ICEBERG_BUCKET:-}"
-    echo "DELTA_BUCKET=${DELTA_BUCKET:-}"
-    echo "HUDI_BUCKET=${HUDI_BUCKET:-}"
-    # Spark engine volume (required by run_catalog_tests.sh for CPD engine creation)
-    echo "SPARK_ENGINE_VOLUME_ID=${SPARK_ENGINE_VOLUME_ID:-}"
-    echo "SPARK_ENGINE_VOLUME_NAME=${SPARK_ENGINE_VOLUME_NAME:-spark-engine-volume}"
+    echo "STORAGE_REGION=us-south"
+    # Bucket names derived from catalog names: <catalog_name>-bucket (hyphens replace underscores)
+    echo "ICEBERG_BUCKET=$(echo "${ICEBERG_CATALOG_NAME:-iceberg_data}" | tr '_' '-')-bucket"
+    echo "DELTA_BUCKET=$(echo "${DELTA_CATALOG_NAME:-delta_data}" | tr '_' '-')-bucket"
+    echo "HUDI_BUCKET=$(echo "${HUDI_CATALOG_NAME:-hudi_data}" | tr '_' '-')-bucket"
+    # Volume name for Spark engine home (volume ID is resolved and appended by the pipeline after this script)
+    echo "SPARK_ENGINE_VOLUME_NAME=spark-engine-volume"
 } > "$OUTPUT_PATH"
 
 chmod 600 "$OUTPUT_PATH"

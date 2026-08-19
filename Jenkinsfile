@@ -20,19 +20,11 @@ pipeline {
         string(name: 'DELTA_CATALOG_NAME',   defaultValue: 'delta_data',   description: 'Delta catalog name. Empty to skip Delta.')
         string(name: 'HIVE_CATALOG_NAME',    defaultValue: '',             description: 'Reserved for future. Ignored in v1.')
         booleanParam(name: 'DELETE_CATALOG_AFTER_TEST', defaultValue: true, description: 'Delete/drop dynamic test catalogs post-execution')
-        // S3/COS storage — required by run_catalog_tests.sh for CPD catalog creation
+        // S3/COS storage credentials — the only values that cannot be auto-discovered from the cluster.
+        // Bucket names and region are derived automatically from catalog names.
         string(name: 'STORAGE_ENDPOINT',   defaultValue: '', description: 'S3-compatible storage endpoint URL (e.g. https://s3.us-south.cloud-object-storage.appdomain.cloud).')
-        string(name: 'STORAGE_ACCESS_KEY', defaultValue: '', description: 'S3 access key (HMAC credential).')
-        string(name: 'STORAGE_SECRET_KEY', defaultValue: '', description: 'S3 secret key (HMAC credential).')
-        string(name: 'STORAGE_REGION',     defaultValue: 'us-south', description: 'S3 region for catalog storage.')
-        string(name: 'ICEBERG_BUCKET',     defaultValue: 'iceberg-bucket', description: 'S3 bucket name for Iceberg catalog.')
-        string(name: 'DELTA_BUCKET',       defaultValue: 'delta-bucket',   description: 'S3 bucket name for Delta catalog.')
-        string(name: 'HUDI_BUCKET',        defaultValue: 'hudi-bucket',    description: 'S3 bucket name for Hudi catalog.')
-        // Spark engine volume — required by run_catalog_tests.sh for CPD engine creation.
-        // Provide the numeric volume instance_id from the CPD spark_instances API.
-        // If left blank the script tries to look it up by name, which is unreliable.
-        string(name: 'SPARK_ENGINE_VOLUME_ID', defaultValue: '', description: 'Numeric volume instance_id for the Spark engine home (CPD only). Leave blank to use volume_name lookup (unreliable).')
-        string(name: 'SPARK_ENGINE_VOLUME_NAME', defaultValue: 'spark-engine-volume', description: 'Volume name for Spark engine home (used only when SPARK_ENGINE_VOLUME_ID is blank).')
+        string(name: 'STORAGE_ACCESS_KEY', defaultValue: '', description: 'S3 HMAC access key.')
+        string(name: 'STORAGE_SECRET_KEY', defaultValue: '', description: 'S3 HMAC secret key.')
         string(name: 'LAKEHOUSE_CONSOLE_VERSION', defaultValue: '2.2.x', description: 'Target watsonx.data Console version')
         string(name: 'DBT_ADAPTER_BRANCH',   defaultValue: 'main', description: 'Target branch/tag of dbt-watsonx-data')
         string(name: 'ADAPTER_REPO_URL',     defaultValue: 'https://github.com/roneymathew/dbt-watsonx-spark.git', description: '')
@@ -149,13 +141,7 @@ pipeline {
                     "DELTA_CATALOG_NAME=${params.DELTA_CATALOG_NAME}",
                     "STORAGE_ENDPOINT=${params.STORAGE_ENDPOINT}",
                     "STORAGE_ACCESS_KEY=${params.STORAGE_ACCESS_KEY}",
-                    "STORAGE_SECRET_KEY=${params.STORAGE_SECRET_KEY}",
-                    "STORAGE_REGION=${params.STORAGE_REGION}",
-                    "ICEBERG_BUCKET=${params.ICEBERG_BUCKET}",
-                    "DELTA_BUCKET=${params.DELTA_BUCKET}",
-                    "HUDI_BUCKET=${params.HUDI_BUCKET}",
-                    "SPARK_ENGINE_VOLUME_ID=${params.SPARK_ENGINE_VOLUME_ID}",
-                    "SPARK_ENGINE_VOLUME_NAME=${params.SPARK_ENGINE_VOLUME_NAME}"
+                    "STORAGE_SECRET_KEY=${params.STORAGE_SECRET_KEY}"
                 ]) {
                     sh '''
                         set -euo pipefail
@@ -195,11 +181,35 @@ pipeline {
                         # this is the same pattern the scripts use when building ZenApiKey.
                         export WATSONX_APIKEY="${CPD_PASSWORD}"
 
+                        # Pre-resolve the Spark engine volume ID from the CPD spark_instances API.
+                        # The given script's built-in lookup (get_available_volume_id) mixes log
+                        # output with its return value, corrupting the volume_id captured by the
+                        # caller. We do it cleanly here and inject it directly into .env so the
+                        # script finds SPARK_ENGINE_VOLUME_ID set and skips its own lookup.
+                        VOLUME_API="${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/cpd/spark_instances"
+                        echo "[volume] Looking up spark-engine-volume via ${VOLUME_API}"
+                        SPARK_ENGINE_VOLUME_ID=$(curl -s -k -X GET "${VOLUME_API}" \
+                            -H "Authorization: Bearer ${AUTH_TOKEN}" \
+                            -H "LhInstanceId: ${WATSONX_INSTANCE_ID}" \
+                            | jq -r '.volumes[]? | select(.display_name == "cpd-instance::spark-engine-volume") | .instance_id // empty' \
+                            | head -n1)
+                        if [ -n "$SPARK_ENGINE_VOLUME_ID" ]; then
+                            echo "[volume] Found volume ID: ${SPARK_ENGINE_VOLUME_ID}"
+                        else
+                            echo "[volume] WARNING: spark-engine-volume not found; engine creation will use volume_name fallback"
+                        fi
+                        export SPARK_ENGINE_VOLUME_ID
+
                         bash "${WORKSPACE}/pipeline/write_env.sh" "${WORKSPACE}/adapter/.env"
 
-                        # Append AUTH_TOKEN so the given scripts source it and skip their
-                        # own auth (which uses "api_key" and would fail with a plain password).
+                        # Append AUTH_TOKEN and resolved volume ID so the given scripts
+                        # source them and skip their own (broken) auth and volume lookup.
                         echo "AUTH_TOKEN=${AUTH_TOKEN}" >> "${WORKSPACE}/adapter/.env"
+                        echo "SPARK_ENGINE_VOLUME_ID=${SPARK_ENGINE_VOLUME_ID}" >> "${WORKSPACE}/adapter/.env"
+
+                        echo "[write_env] .env key values:"
+                        grep -E '^(DEPLOYMENT_TYPE|SPARK_ENGINE_NAME|SPARK_ENGINE_VOLUME_ID|STORAGE_ENDPOINT|ICEBERG_BUCKET|DELTA_BUCKET|HUDI_BUCKET)=' \
+                            "${WORKSPACE}/adapter/.env" || true
                     '''
                 }
             }
