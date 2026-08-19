@@ -11,9 +11,9 @@ pipeline {
         booleanParam(name: 'SKIP_INFRA', defaultValue: false, description: 'True: skip catalog+engine creation, assume they exist (uses run_test.sh). False: full stack (uses run_catalog_tests.sh).')
         // Connection parameters — entered at build time
         string(name: 'WATSONX_HOSTNAME',    defaultValue: '', description: 'watsonx.data hostname or CPD base URL (e.g. https://cpd.example.com).')
-        string(name: 'WATSONX_APIKEY',      defaultValue: '', description: 'API key / CPD password.')
+        string(name: 'CPD_USERNAME',        defaultValue: '', description: 'CPD login username (e.g. cpadmin). Leave blank for SaaS.')
+        string(name: 'CPD_PASSWORD',        defaultValue: '', description: 'CPD login password. The pipeline exchanges this for a bearer token before calling the given scripts.')
         string(name: 'WATSONX_INSTANCE_ID', defaultValue: '', description: 'watsonx.data instance ID.')
-        string(name: 'CPD_USERNAME',        defaultValue: '', description: 'CPD login username (e.g. admin). Leave blank for SaaS.')
         // Catalog parameters
         string(name: 'ICEBERG_CATALOG_NAME', defaultValue: 'iceberg_data', description: 'Iceberg catalog name. Required in v1 (only catalog with test coverage).')
         string(name: 'HUDI_CATALOG_NAME',    defaultValue: 'hudi_data',    description: 'Hudi catalog name. Empty to skip Hudi.')
@@ -50,8 +50,11 @@ pipeline {
                     if (!params.WATSONX_HOSTNAME?.trim()) {
                         error 'WATSONX_HOSTNAME is required.'
                     }
-                    if (!params.WATSONX_APIKEY?.toString()?.trim()) {
-                        error 'WATSONX_APIKEY is required.'
+                    if (!params.CPD_USERNAME?.trim()) {
+                        error 'CPD_USERNAME is required.'
+                    }
+                    if (!params.CPD_PASSWORD?.trim()) {
+                        error 'CPD_PASSWORD is required.'
                     }
                     if (!params.WATSONX_INSTANCE_ID?.trim()) {
                         error 'WATSONX_INSTANCE_ID is required.'
@@ -125,9 +128,9 @@ pipeline {
             steps {
                 withEnv([
                     "WATSONX_HOSTNAME=${params.WATSONX_HOSTNAME}",
-                    "WATSONX_APIKEY=${params.WATSONX_APIKEY}",
                     "WATSONX_INSTANCE_ID=${params.WATSONX_INSTANCE_ID}",
                     "CPD_USERNAME=${params.CPD_USERNAME}",
+                    "CPD_PASSWORD=${params.CPD_PASSWORD}",
                     "ICEBERG_CATALOG_NAME=${params.ICEBERG_CATALOG_NAME}",
                     "HUDI_CATALOG_NAME=${params.HUDI_CATALOG_NAME}",
                     "DELTA_CATALOG_NAME=${params.DELTA_CATALOG_NAME}"
@@ -136,7 +139,32 @@ pipeline {
                         set -euo pipefail
                         set +x
                         export HOME="${WORKSPACE}/.home"
+
+                        # Exchange username+password for a CPD bearer token.
+                        # Both given scripts check: if [ -n "$AUTH_TOKEN" ]; skip own auth.
+                        # Using "password" field (not "api_key") for password-based login.
+                        AUTH_TOKEN=$(curl -s -k -X POST \
+                            "${WATSONX_HOSTNAME}/icp4d-api/v1/authorize" \
+                            -H "Content-Type: application/json" \
+                            -d "{\"username\":\"${CPD_USERNAME}\",\"password\":\"${CPD_PASSWORD}\"}" \
+                            | jq -r '.token // empty')
+                        if [ -z "$AUTH_TOKEN" ]; then
+                            echo "[auth] ERROR: CPD authentication failed. Check WATSONX_HOSTNAME, CPD_USERNAME, CPD_PASSWORD." >&2
+                            exit 1
+                        fi
+                        echo "[auth] CPD token obtained successfully."
+                        export AUTH_TOKEN
+
+                        # WATSONX_APIKEY is expected by write_env.sh and the given scripts
+                        # for Spark conf (ZenApiKey). Use the password as the key value —
+                        # this is the same pattern the scripts use when building ZenApiKey.
+                        export WATSONX_APIKEY="${CPD_PASSWORD}"
+
                         bash "${WORKSPACE}/pipeline/write_env.sh" "${WORKSPACE}/adapter/.env"
+
+                        # Append AUTH_TOKEN so the given scripts source it and skip their
+                        # own auth (which uses "api_key" and would fail with a plain password).
+                        echo "AUTH_TOKEN=${AUTH_TOKEN}" >> "${WORKSPACE}/adapter/.env"
                     '''
                 }
             }
@@ -145,9 +173,9 @@ pipeline {
             steps {
                 withEnv([
                     "WATSONX_HOSTNAME=${params.WATSONX_HOSTNAME}",
-                    "WATSONX_APIKEY=${params.WATSONX_APIKEY}",
                     "WATSONX_INSTANCE_ID=${params.WATSONX_INSTANCE_ID}",
                     "CPD_USERNAME=${params.CPD_USERNAME}",
+                    "CPD_PASSWORD=${params.CPD_PASSWORD}",
                     "SKIP_INFRA=${params.SKIP_INFRA}",
                     "ENABLE_AUTHZ=${params.ENABLE_AUTHZ}",
                     "ICEBERG_CATALOG_NAME=${params.ICEBERG_CATALOG_NAME}",
@@ -164,6 +192,12 @@ pipeline {
                         cp -f "${WORKSPACE}/scripts/run_test.sh" "${WORKSPACE}/adapter/scripts/run_test.sh"
                         cp -f "${WORKSPACE}/scripts/run_catalog_tests.sh" "${WORKSPACE}/adapter/scripts/run_catalog_tests.sh"
                         chmod +x "${WORKSPACE}/adapter/scripts/"*.sh
+
+                        # Re-read the token written by Write .env (avoids re-authing).
+                        AUTH_TOKEN=$(grep '^AUTH_TOKEN=' "${WORKSPACE}/adapter/.env" | cut -d= -f2-)
+                        export AUTH_TOKEN
+                        # WATSONX_APIKEY used by Spark ZenApiKey conf inside the given scripts.
+                        export WATSONX_APIKEY="${CPD_PASSWORD}"
 
                         # Initialize marker
                         # shellcheck disable=SC1091
@@ -189,11 +223,8 @@ pipeline {
                         "$SCRIPT"
 
                         # --- record what this run created, for the post/always teardown ---
-                        AUTH_TOKEN=$(curl -s -k -X POST \
-                            "${WATSONX_HOSTNAME}/icp4d-api/v1/authorize" \
-                            -H "Content-Type: application/json" \
-                            -d "{\"username\":\"${CPD_USERNAME}\",\"api_key\":\"${WATSONX_APIKEY}\"}" \
-                            | jq -r .token)
+                        # Re-use the already-obtained token (still valid within the run).
+                        AUTH_TOKEN=$(grep '^AUTH_TOKEN=' "${WORKSPACE}/adapter/.env" | cut -d= -f2-)
 
                         ENGINE_ID=$(curl -s -k -X GET \
                             "${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/spark_engines" \
@@ -230,9 +261,9 @@ pipeline {
             steps {
                 withEnv([
                     "WATSONX_HOSTNAME=${params.WATSONX_HOSTNAME}",
-                    "WATSONX_APIKEY=${params.WATSONX_APIKEY}",
                     "WATSONX_INSTANCE_ID=${params.WATSONX_INSTANCE_ID}",
-                    "CPD_USERNAME=${params.CPD_USERNAME}"
+                    "CPD_USERNAME=${params.CPD_USERNAME}",
+                    "CPD_PASSWORD=${params.CPD_PASSWORD}"
                 ]) {
                 script {
                     // === 3-part naming workaround ===
@@ -284,8 +315,8 @@ pipeline {
                                     AUTH_TOKEN=$(curl -s -k -X POST \
                                         "${WATSONX_HOSTNAME}/icp4d-api/v1/authorize" \
                                         -H "Content-Type: application/json" \
-                                        -d "{\"username\":\"${CPD_USERNAME}\",\"api_key\":\"${WATSONX_APIKEY}\"}" \
-                                        | jq -r .token)
+                                        -d "{\"username\":\"${CPD_USERNAME}\",\"password\":\"${CPD_PASSWORD}\"}" \
+                                        | jq -r '.token // empty')
 
                                     ENGINE_ID=$(curl -s -k -X GET \
                                         "${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/spark_engines" \
@@ -341,9 +372,9 @@ pipeline {
             node('extension') {
                 withEnv([
                     "WATSONX_HOSTNAME=${params.WATSONX_HOSTNAME}",
-                    "WATSONX_APIKEY=${params.WATSONX_APIKEY}",
                     "WATSONX_INSTANCE_ID=${params.WATSONX_INSTANCE_ID}",
                     "CPD_USERNAME=${params.CPD_USERNAME}",
+                    "CPD_PASSWORD=${params.CPD_PASSWORD}",
                     "DELETE_CATALOG_AFTER_TEST=${params.DELETE_CATALOG_AFTER_TEST}"
                 ]) {
                     sh '''
@@ -355,8 +386,8 @@ pipeline {
                             AUTH_TOKEN=$(curl -s -k -X POST \
                                 "${WATSONX_HOSTNAME}/icp4d-api/v1/authorize" \
                                 -H "Content-Type: application/json" \
-                                -d "{\"username\":\"${CPD_USERNAME}\",\"api_key\":\"${WATSONX_APIKEY}\"}" \
-                                | jq -r .token)
+                                -d "{\"username\":\"${CPD_USERNAME}\",\"password\":\"${CPD_PASSWORD}\"}" \
+                                | jq -r '.token // empty')
                             export AUTH_TOKEN
                             export LAKEHOUSE_API_VERSION="v3"
 
