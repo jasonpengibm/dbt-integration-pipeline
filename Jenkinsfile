@@ -146,10 +146,13 @@ pipeline {
                         AUTH_URL="${WATSONX_HOSTNAME}/icp4d-api/v1/authorize"
                         echo "[auth] POST ${AUTH_URL} (username=${CPD_USERNAME})"
 
+                        # Build JSON body without backslash escaping to avoid shell quoting issues.
+                        AUTH_BODY=$(printf '{"username":"%s","password":"%s"}' "${CPD_USERNAME}" "${CPD_PASSWORD}")
+
                         HTTP_STATUS=$(curl -s -k -o /tmp/_auth_resp.json -w "%{http_code}" \
                             -X POST "${AUTH_URL}" \
                             -H "Content-Type: application/json" \
-                            -d "{\"username\":\"${CPD_USERNAME}\",\"password\":\"${CPD_PASSWORD}\"}")
+                            -d "${AUTH_BODY}")
 
                         echo "[auth] HTTP status: ${HTTP_STATUS}"
                         # Print response but mask any token value for log safety
@@ -322,10 +325,11 @@ pipeline {
                                     # shellcheck disable=SC1091
                                     source "${WORKSPACE}/.venv/bin/activate"
 
+                                    AUTH_BODY=$(printf '{"username":"%s","password":"%s"}' "${CPD_USERNAME}" "${CPD_PASSWORD}")
                                     AUTH_TOKEN=$(curl -s -k -X POST \
                                         "${WATSONX_HOSTNAME}/icp4d-api/v1/authorize" \
                                         -H "Content-Type: application/json" \
-                                        -d "{\"username\":\"${CPD_USERNAME}\",\"password\":\"${CPD_PASSWORD}\"}" \
+                                        -d "${AUTH_BODY}" \
                                         | jq -r '.token // empty')
 
                                     ENGINE_ID=$(curl -s -k -X GET \
@@ -393,10 +397,11 @@ pipeline {
                         export HOME="${WORKSPACE}/.home"
 
                         if [ -f "${WORKSPACE}/.pipeline-marker.json" ]; then
+                            AUTH_BODY=$(printf '{"username":"%s","password":"%s"}' "${CPD_USERNAME}" "${CPD_PASSWORD}")
                             AUTH_TOKEN=$(curl -s -k -X POST \
                                 "${WATSONX_HOSTNAME}/icp4d-api/v1/authorize" \
                                 -H "Content-Type: application/json" \
-                                -d "{\"username\":\"${CPD_USERNAME}\",\"password\":\"${CPD_PASSWORD}\"}" \
+                                -d "${AUTH_BODY}" \
                                 | jq -r '.token // empty')
                             export AUTH_TOKEN
                             export LAKEHOUSE_API_VERSION="v3"
