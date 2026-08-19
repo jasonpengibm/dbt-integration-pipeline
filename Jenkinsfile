@@ -218,16 +218,31 @@ pipeline {
                         cp -f "${WORKSPACE}/scripts/run_catalog_tests.sh" "${WORKSPACE}/adapter/scripts/run_catalog_tests.sh"
                         chmod +x "${WORKSPACE}/adapter/scripts/"*.sh
 
-                        # Patch the working copy of run_catalog_tests.sh: inject the volume shim
-                        # source line immediately BEFORE the "main "$@"" call at the bottom.
-                        # The shim redefines get_available_volume_id — since it is sourced after
-                        # the original definition but before main() executes, bash uses the shim.
-                        # Idempotent: skips if already patched.
+                        # Patch the working copy of run_catalog_tests.sh: inject a
+                        # "source <shim>" line immediately BEFORE the "# Run main function"
+                        # comment. The shim redefines get_available_volume_id after the
+                        # original definition, so bash uses the shim when main() runs.
+                        # Python is used for the injection to avoid shell quoting / delimiter
+                        # issues with sed when SHIM_PATH contains slashes.
                         SHIM_PATH="${WORKSPACE}/pipeline/volume_shim.sh"
                         SCRIPT_COPY="${WORKSPACE}/adapter/scripts/run_catalog_tests.sh"
                         if ! grep -q 'volume_shim.sh' "$SCRIPT_COPY"; then
-                            sed -i "s|^# Run main function\$|# volume shim — injected by pipeline (overrides get_available_volume_id)\nsource \"${SHIM_PATH}\"\n\n# Run main function|" "$SCRIPT_COPY"
-                            echo "[patch] injected volume_shim.sh before main() call in run_catalog_tests.sh"
+                            python3 - "${SCRIPT_COPY}" "${SHIM_PATH}" <<'PYEOF'
+import sys
+script_path, shim_path = sys.argv[1], sys.argv[2]
+with open(script_path) as f:
+    lines = f.readlines()
+anchor = '# Run main function\n'
+idx = next((i for i, l in enumerate(lines) if l == anchor), None)
+if idx is not None:
+    lines.insert(idx, f'source "{shim_path}"\n')
+    lines.insert(idx, '# volume shim injected by pipeline\n')
+    with open(script_path, 'w') as f:
+        f.writelines(lines)
+    print("[patch] injected volume_shim.sh before main() call")
+else:
+    print("[patch] WARNING: anchor '# Run main function' not found — shim not injected", file=__import__('sys').stderr)
+PYEOF
                         fi
 
                         # Re-read the token written by Write .env (avoids re-authing).
