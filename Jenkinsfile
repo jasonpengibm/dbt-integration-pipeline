@@ -1,38 +1,46 @@
-// Multi-Catalog Integration Tests (AuthZ & Non-AuthZ) for dbt-watsonx-spark.
-// Design doc: docs/superpowers/specs/2026-08-13-jenkins-dbt-watsonx-pipeline-design.md
-// Implementation plan: docs/superpowers/plans/2026-08-13-jenkins-dbt-watsonx-pipeline.md
+// dbt-watsonx-spark integration tests, driven end-to-end on a watsonx.data cluster.
+//
+// Flow: validate params → clone the adapter under test → build an isolated Python
+// venv → authenticate to CPD and write .env → run the given script (creates
+// catalogs, 2 Spark engines, a query server, then runs the Iceberg pytest suite)
+// → sweep Hudi/Delta pytest → publish junit → teardown (always runs: delete this
+// build's engines and any catalogs this build created, then purge the workspace).
 
 pipeline {
     agent { label 'extension' }
 
     parameters {
         choice(name: 'DEPLOYMENT_FORM', choices: ['CPD', 'SAAS'], description: 'Target deployment platform')
-        booleanParam(name: 'ENABLE_AUTHZ', defaultValue: true, description: 'Run with AuthZ enabled')
+        booleanParam(name: 'ENABLE_AUTHZ', defaultValue: true, description: 'Run tests against the authz-enabled engine (else the standard one).')
         booleanParam(name: 'SKIP_INFRA', defaultValue: false, description: 'True: skip catalog+engine creation, assume they exist (uses run_test.sh). False: full stack (uses run_catalog_tests.sh).')
-        // Connection parameters — entered at build time
+
+        // CPD / watsonx.data connection
         string(name: 'WATSONX_HOSTNAME',    defaultValue: '', description: 'watsonx.data hostname or CPD base URL (e.g. https://cpd.example.com).')
         string(name: 'CPD_USERNAME',        defaultValue: '', description: 'CPD login username (e.g. cpadmin). Leave blank for SaaS.')
-        string(name: 'CPD_PASSWORD',        defaultValue: '', description: 'CPD login password. The pipeline exchanges this for a bearer token before calling the given scripts.')
+        string(name: 'CPD_PASSWORD',        defaultValue: '', description: 'CPD login password. The pipeline exchanges it for a bearer token before calling the given scripts.')
         string(name: 'WATSONX_INSTANCE_ID', defaultValue: '', description: 'watsonx.data instance ID.')
-        // Catalog parameters
-        string(name: 'ICEBERG_CATALOG_NAME', defaultValue: 'iceberg_data', description: 'Iceberg catalog name. Required in v1 (only catalog with test coverage).')
+
+        // Catalogs to exercise. Blank = skip that catalog.
+        string(name: 'ICEBERG_CATALOG_NAME', defaultValue: 'iceberg_data', description: 'Iceberg catalog name. Required.')
         string(name: 'HUDI_CATALOG_NAME',    defaultValue: 'hudi_data',    description: 'Hudi catalog name. Empty to skip Hudi.')
         string(name: 'DELTA_CATALOG_NAME',   defaultValue: 'delta_data',   description: 'Delta catalog name. Empty to skip Delta.')
         string(name: 'HIVE_CATALOG_NAME',    defaultValue: '',             description: 'Reserved for future. Ignored in v1.')
-        booleanParam(name: 'DELETE_CATALOG_AFTER_TEST', defaultValue: true, description: 'Delete/drop dynamic test catalogs post-execution')
-        // S3/COS storage credentials — the only values that cannot be auto-discovered from the cluster.
-        string(name: 'STORAGE_ENDPOINT',   defaultValue: '', description: 'S3-compatible storage endpoint URL (e.g. https://s3.us-south.cloud-object-storage.appdomain.cloud).')
+        booleanParam(name: 'DELETE_CATALOG_AFTER_TEST', defaultValue: true, description: 'Delete dynamic test catalogs post-execution')
+
+        // COS storage. Cannot be auto-discovered from the cluster.
+        string(name: 'STORAGE_ENDPOINT',   defaultValue: '', description: 'S3-compatible endpoint URL (e.g. https://s3.us-south.cloud-object-storage.appdomain.cloud).')
         string(name: 'STORAGE_ACCESS_KEY', defaultValue: '', description: 'S3 HMAC access key.')
         string(name: 'STORAGE_SECRET_KEY', defaultValue: '', description: 'S3 HMAC secret key.')
-        // Bucket-name overrides. Leave blank to derive from catalog name (<catalog>-bucket, underscores→hyphens).
-        // Set explicitly when your COS instance's buckets don't match the derived name.
-        string(name: 'ICEBERG_BUCKET_NAME', defaultValue: '', description: 'Iceberg bucket name (default: derived from ICEBERG_CATALOG_NAME).')
-        string(name: 'HUDI_BUCKET_NAME',    defaultValue: '', description: 'Hudi bucket name (default: derived from HUDI_CATALOG_NAME).')
-        string(name: 'DELTA_BUCKET_NAME',   defaultValue: '', description: 'Delta bucket name (default: derived from DELTA_CATALOG_NAME).')
+
+        // Bucket-name overrides. Blank = derive from catalog name (<catalog>-bucket, underscores→hyphens).
+        string(name: 'ICEBERG_BUCKET_NAME', defaultValue: '', description: 'Iceberg bucket (default: derived from ICEBERG_CATALOG_NAME).')
+        string(name: 'HUDI_BUCKET_NAME',    defaultValue: '', description: 'Hudi bucket (default: derived from HUDI_CATALOG_NAME).')
+        string(name: 'DELTA_BUCKET_NAME',   defaultValue: '', description: 'Delta bucket (default: derived from DELTA_CATALOG_NAME).')
+
         string(name: 'LAKEHOUSE_CONSOLE_VERSION', defaultValue: '2.2.x', description: 'Target watsonx.data Console version')
-        string(name: 'DBT_ADAPTER_BRANCH',   defaultValue: 'main', description: 'Target branch/tag of dbt-watsonx-data')
-        string(name: 'ADAPTER_REPO_URL',     defaultValue: 'https://github.com/roneymathew/dbt-watsonx-spark.git', description: '')
-        string(name: 'TIMEOUT_MINUTES',      defaultValue: '90', description: 'Overall build timeout')
+        string(name: 'DBT_ADAPTER_BRANCH',   defaultValue: 'main', description: 'Branch/tag of the adapter repo to test.')
+        string(name: 'ADAPTER_REPO_URL',     defaultValue: 'https://github.com/roneymathew/dbt-watsonx-spark.git', description: 'Adapter git repo.')
+        string(name: 'TIMEOUT_MINUTES',      defaultValue: '90', description: 'Overall build timeout.')
     }
 
     options {
@@ -42,11 +50,12 @@ pipeline {
     }
 
     stages {
+        // Check missing or invalid inputs.
         stage('Validate params') {
             steps {
                 script {
                     if (!params.ICEBERG_CATALOG_NAME?.trim()) {
-                        error 'ICEBERG_CATALOG_NAME is required in v1 (Iceberg is the only catalog with test coverage; HUDI/DELTA may be empty to skip).'
+                        error 'ICEBERG_CATALOG_NAME is required (HUDI/DELTA may be blank to skip).'
                     }
                     if (!(params.DEPLOYMENT_FORM in ['CPD', 'SAAS'])) {
                         error "DEPLOYMENT_FORM must be CPD or SAAS, got: ${params.DEPLOYMENT_FORM}"
@@ -54,22 +63,16 @@ pipeline {
                     if (params.SKIP_INFRA && params.DEPLOYMENT_FORM == 'SAAS') {
                         error 'SKIP_INFRA=true is not supported with DEPLOYMENT_FORM=SAAS (run_test.sh is CPD-only).'
                     }
-                    if (!params.WATSONX_HOSTNAME?.trim()) {
-                        error 'WATSONX_HOSTNAME is required.'
-                    }
-                    if (!params.CPD_USERNAME?.trim()) {
-                        error 'CPD_USERNAME is required.'
-                    }
-                    if (!params.CPD_PASSWORD?.trim()) {
-                        error 'CPD_PASSWORD is required.'
-                    }
-                    if (!params.WATSONX_INSTANCE_ID?.trim()) {
-                        error 'WATSONX_INSTANCE_ID is required.'
-                    }
+                    if (!params.WATSONX_HOSTNAME?.trim())    { error 'WATSONX_HOSTNAME is required.' }
+                    if (!params.CPD_USERNAME?.trim())        { error 'CPD_USERNAME is required.' }
+                    if (!params.CPD_PASSWORD?.trim())        { error 'CPD_PASSWORD is required.' }
+                    if (!params.WATSONX_INSTANCE_ID?.trim()) { error 'WATSONX_INSTANCE_ID is required.' }
                     echo "Params validated: deployment=${params.DEPLOYMENT_FORM}, authz=${params.ENABLE_AUTHZ}, skip_infra=${params.SKIP_INFRA}"
                 }
             }
         }
+
+        // Clone the adapter under test into ${WORKSPACE}/adapter.
         stage('Checkout adapter') {
             steps {
                 withEnv(["BRANCH=${params.DBT_ADAPTER_BRANCH}", "REPO=${params.ADAPTER_REPO_URL}"]) {
@@ -82,19 +85,20 @@ pipeline {
                 }
             }
         }
+
+        // Python venv + install the adapter and pytest. Torn down in post/always.
         stage('Prepare workspace') {
             steps {
                 script {
-                    // BUILD_TAG_SHORT: strip 'jenkins-' prefix, keep it URL-safe.
-                    // SPARK_ENGINE_NAME is the *base* — run_catalog_tests.sh always
-                    // creates two engines per run: ${base} (standard) and ${base}-authz.
-                    // Do NOT bake an authz/std suffix into the base or the script's
-                    // derivation will produce ${base}-authz-authz for the second one.
+                    // SPARK_ENGINE_NAME is *base*. The given run_catalog_tests.sh
+                    // always creates two engines per run: <base> (standard) and
+                    // <base>-authz. Do not bake -authz/-std into the base or the
+                    // script's derivation produces <base>-authz-authz.
                     def shortTag = env.BUILD_TAG.replaceAll('[^A-Za-z0-9-]', '-').take(24)
-                    env.SPARK_ENGINE_NAME = "spark-dbt-${shortTag}-${params.DEPLOYMENT_FORM.toLowerCase()}"
+                    env.SPARK_ENGINE_NAME       = "spark-dbt-${shortTag}-${params.DEPLOYMENT_FORM.toLowerCase()}"
                     env.SPARK_ENGINE_AUTHZ_NAME = "${env.SPARK_ENGINE_NAME}-authz"
-                    env.DEPLOYMENT_TYPE = params.DEPLOYMENT_FORM.toLowerCase()
-                    env.PYTHON_VENV_PATH = "${env.WORKSPACE}/.venv"
+                    env.DEPLOYMENT_TYPE         = params.DEPLOYMENT_FORM.toLowerCase()
+                    env.PYTHON_VENV_PATH        = "${env.WORKSPACE}/.venv"
                 }
                 sh '''
                     set -euo pipefail
@@ -110,6 +114,9 @@ pipeline {
                 '''
             }
         }
+
+        // Authenticate to CPD, and render the
+        // .env file the given scripts read.
         stage('Write .env') {
             steps {
                 withEnv([
@@ -132,44 +139,32 @@ pipeline {
                         set +x
                         export HOME="${WORKSPACE}/.home"
 
-                        # Exchange username+password for a CPD bearer token.
-                        # Both given scripts check: if [ -n "$AUTH_TOKEN" ]; skip own auth.
-                        # Using "password" field (not "api_key") for password-based login.
+                        # 1. Exchange username+password for a CPD bearer token. The given
+                        #    scripts see AUTH_TOKEN set and skip their own (broken) auth.
                         AUTH_URL="${WATSONX_HOSTNAME}/icp4d-api/v1/authorize"
                         echo "[auth] POST ${AUTH_URL} (username=${CPD_USERNAME})"
-
-                        # Build JSON body without backslash escaping to avoid shell quoting issues.
                         AUTH_BODY=$(printf '{"username":"%s","password":"%s"}' "${CPD_USERNAME}" "${CPD_PASSWORD}")
-
                         HTTP_STATUS=$(curl -s -k -o /tmp/_auth_resp.json -w "%{http_code}" \
                             -X POST "${AUTH_URL}" \
                             -H "Content-Type: application/json" \
                             -d "${AUTH_BODY}")
-
                         echo "[auth] HTTP status: ${HTTP_STATUS}"
-                        # Print response but mask any token value for log safety
                         sed 's/"token":"[^"]*"/"token":"<REDACTED>"/g' /tmp/_auth_resp.json || true
-
                         AUTH_TOKEN=$(jq -r '.token // empty' /tmp/_auth_resp.json)
                         rm -f /tmp/_auth_resp.json
-
                         if [ -z "$AUTH_TOKEN" ]; then
-                            echo "[auth] ERROR: CPD authentication failed (HTTP ${HTTP_STATUS}). Check WATSONX_HOSTNAME, CPD_USERNAME, CPD_PASSWORD." >&2
+                            echo "[auth] ERROR: CPD authentication failed (HTTP ${HTTP_STATUS}). Check host/user/password." >&2
                             exit 1
                         fi
-                        echo "[auth] CPD token obtained successfully (HTTP ${HTTP_STATUS})."
+                        echo "[auth] CPD token obtained."
                         export AUTH_TOKEN
 
-                        # WATSONX_APIKEY is expected by write_env.sh and the given scripts
-                        # for Spark conf (ZenApiKey). Use the password as the key value —
-                        # this is the same pattern the scripts use when building ZenApiKey.
+                        # The given scripts build Spark's ZenApiKey from CPD_PASSWORD.
                         export WATSONX_APIKEY="${CPD_PASSWORD}"
 
-                        # Pre-resolve the Spark engine volume ID from the CPD spark_instances API.
-                        # The given script's built-in lookup (get_available_volume_id) mixes log
-                        # output with its return value, corrupting the volume_id captured by the
-                        # caller. We do it cleanly here and inject it directly into .env so the
-                        # script finds SPARK_ENGINE_VOLUME_ID set and skips its own lookup.
+                        # 2. Pre-resolve the Spark engine volume ID. The given script's own
+                        #    lookup writes log lines to stdout and corrupts the captured id;
+                        #    doing it here cleanly lets the script skip its version.
                         VOLUME_API="${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/cpd/spark_instances"
                         echo "[volume] Looking up spark-engine-volume via ${VOLUME_API}"
                         SPARK_ENGINE_VOLUME_ID=$(curl -s -k -X GET "${VOLUME_API}" \
@@ -184,16 +179,11 @@ pipeline {
                         fi
                         export SPARK_ENGINE_VOLUME_ID
 
+                        # 3. Render .env and append the token + volume id for the given script.
                         bash "${WORKSPACE}/pipeline/write_env.sh" "${WORKSPACE}/adapter/.env"
-
-                        # Append AUTH_TOKEN so the given scripts source it and skip their
-                        # own auth (which uses "api_key" and would fail with a plain password).
                         echo "AUTH_TOKEN=${AUTH_TOKEN}" >> "${WORKSPACE}/adapter/.env"
-                        # Only append SPARK_ENGINE_VOLUME_ID when non-empty — an empty value
-                        # in .env causes the given script to run its own broken lookup (which
-                        # pollutes stdout with log lines, corrupting the captured volume_id).
-                        # When omitted, the script falls through to the "create new volume"
-                        # branch which uses SPARK_ENGINE_VOLUME_NAME instead.
+                        # Only write SPARK_ENGINE_VOLUME_ID when non-empty — an empty value
+                        # triggers the script's broken lookup path.
                         if [ -n "$SPARK_ENGINE_VOLUME_ID" ]; then
                             echo "SPARK_ENGINE_VOLUME_ID=${SPARK_ENGINE_VOLUME_ID}" >> "${WORKSPACE}/adapter/.env"
                         fi
@@ -205,6 +195,10 @@ pipeline {
                 }
             }
         }
+
+        // Copy given scripts, patch in the volume, mark any existing
+        // catalogs as reused, then run the given script (creates catalogs + 2 engines +
+        // query server, then runs the Iceberg pytest suite). Records what to clean up.
         stage('Run given script (infra + Iceberg pytest)') {
             steps {
                 withEnv([
@@ -222,23 +216,23 @@ pipeline {
                         set -euo pipefail
                         set +x
                         export HOME="${WORKSPACE}/.home"
-                        # Deploy the given scripts into the adapter checkout so their SCRIPT_DIR/..
-                        # resolves to the adapter root (where tests/ lives).
+
+                        # Copy the given scripts into the adapter checkout so their
+                        # SCRIPT_DIR/.. resolves to the adapter root (where tests/ lives).
                         mkdir -p "${WORKSPACE}/adapter/scripts"
-                        cp -f "${WORKSPACE}/scripts/run_test.sh" "${WORKSPACE}/adapter/scripts/run_test.sh"
+                        cp -f "${WORKSPACE}/scripts/run_test.sh"          "${WORKSPACE}/adapter/scripts/run_test.sh"
                         cp -f "${WORKSPACE}/scripts/run_catalog_tests.sh" "${WORKSPACE}/adapter/scripts/run_catalog_tests.sh"
                         chmod +x "${WORKSPACE}/adapter/scripts/"*.sh
 
-                        # Patch the working copy of run_catalog_tests.sh: inject a
-                        # "source <shim>" line immediately before the "# Run main function"
-                        # anchor. run_catalog_tests.sh defines get_available_volume_id itself
-                        # (line ~756), which overrides any exported version, so the shim must
-                        # be sourced AFTER that definition and BEFORE main() runs.
+                        # Inject `source <volume_shim.sh>` right before the script's
+                        # `main "$@"` call. The script defines get_available_volume_id
+                        # itself (~line 756), which overrides any exported version, so
+                        # the shim must be sourced AFTER that definition and BEFORE main.
                         SHIM_PATH="${WORKSPACE}/pipeline/volume_shim.sh"
                         SCRIPT_COPY="${WORKSPACE}/adapter/scripts/run_catalog_tests.sh"
                         if ! grep -q 'volume_shim.sh' "$SCRIPT_COPY"; then
-                            # Pass the double-quote character as an awk variable to avoid
-                            # any quoting/escape conflict between Groovy, shell, and awk.
+                            # -v q='"' passes the double-quote as a variable so we do not
+                            # have to escape it through Groovy → shell → awk.
                             awk -v shim="$SHIM_PATH" -v q='"' '
                                 /^# Run main function$/ && !injected {
                                     print "# volume shim injected by pipeline"
@@ -258,22 +252,19 @@ pipeline {
                             echo "[patch] injected volume_shim.sh before main() call"
                         fi
 
-                        # Re-read the token written by Write .env (avoids re-authing).
+                        # Re-use the token written to .env (no need to re-auth).
                         AUTH_TOKEN=$(grep '^AUTH_TOKEN=' "${WORKSPACE}/adapter/.env" | cut -d= -f2-)
                         export AUTH_TOKEN
-                        # WATSONX_APIKEY used by Spark ZenApiKey conf inside the given scripts.
                         export WATSONX_APIKEY="${CPD_PASSWORD}"
 
-                        # Initialize marker
                         # shellcheck disable=SC1091
                         source "${WORKSPACE}/pipeline/marker_utils.sh"
                         MARKER="${WORKSPACE}/.pipeline-marker.json"
                         marker_init "$MARKER" "${BUILD_TAG}"
 
-                        # --- preflight: record any catalog that ALREADY exists as `_reused` ---
-                        # cleanup_catalogs.sh only deletes catalogs in `_created`, so anything
-                        # marked reused here is safe from teardown. This protects shared
-                        # baseline catalogs from a previous manual setup or a shared instance.
+                        # Preflight: catalogs that ALREADY exist get recorded as `_reused`.
+                        # cleanup_catalogs.sh only deletes catalogs in `_created`, so
+                        # pre-existing (shared/baseline) catalogs stay safe on teardown.
                         preflight_catalog() {
                             local catalog_name=$1
                             [ -z "$catalog_name" ] && return 0
@@ -285,40 +276,38 @@ pipeline {
                                 -H "AuthInstanceId: ${WATSONX_INSTANCE_ID}")
                             if [ "$http" = "200" ]; then
                                 marker_record_catalog_reused "$MARKER" "$catalog_name"
-                                echo "[preflight] catalog '$catalog_name' already exists — will preserve on teardown"
+                                echo "[preflight] '$catalog_name' already exists — will preserve on teardown"
                             else
-                                echo "[preflight] catalog '$catalog_name' not found (HTTP $http) — will treat as created-by-this-run"
+                                echo "[preflight] '$catalog_name' not found (HTTP $http) — will treat as created-by-this-run"
                             fi
                         }
                         preflight_catalog "$ICEBERG_CATALOG_NAME"
                         preflight_catalog "$HUDI_CATALOG_NAME"
                         preflight_catalog "$DELTA_CATALOG_NAME"
 
-                        # Activate venv and cd to adapter root
                         # shellcheck disable=SC1091
                         source "${WORKSPACE}/.venv/bin/activate"
                         cd "${WORKSPACE}/adapter"
 
+                        # SKIP_INFRA branches between "create everything then test" and
+                        # "assume infra exists, just test".
                         if [ "$SKIP_INFRA" = "true" ]; then
                             SCRIPT="./scripts/run_test.sh"
                         else
                             SCRIPT="./scripts/run_catalog_tests.sh"
                         fi
 
-                        # The given scripts' pytest invocations can't be modified directly;
-                        # PYTEST_ADDOPTS lets pytest pick up --junitxml so the Report stage's
-                        # junit publisher has something to find.
+                        # The given script's pytest invocation is fixed; PYTEST_ADDOPTS is
+                        # the way to get a --junitxml into it for the Report stage.
                         export PYTEST_ADDOPTS="--junitxml=junit-iceberg.xml"
 
                         "$SCRIPT"
 
-                        # --- record what this run created, for the post/always teardown ---
-                        # Re-use the already-obtained token (still valid within the run).
+                        # Record engines and catalogs this run touched, for teardown.
                         AUTH_TOKEN=$(grep '^AUTH_TOKEN=' "${WORKSPACE}/adapter/.env" | cut -d= -f2-)
 
-                        # run_catalog_tests.sh creates BOTH the standard engine and the
-                        # ${base}-authz engine on every run. Record both so post/always
-                        # deletes both — otherwise the second one leaks.
+                        # The given script always creates BOTH <base> and <base>-authz —
+                        # record both ids or the second one leaks on teardown.
                         SPARK_ENGINES_JSON=$(curl -s -k -X GET \
                             "${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/spark_engines" \
                             -H "Authorization: Bearer ${AUTH_TOKEN}" \
@@ -329,18 +318,16 @@ pipeline {
                                     '.spark_engines[]? | select(.display_name==$n) | .id // .engine_id' \
                                 | head -n1)
                             if [ -n "$EID" ]; then
-                                marker_record_engine "${WORKSPACE}/.pipeline-marker.json" "$EID"
+                                marker_record_engine "$MARKER" "$EID"
                                 echo "[marker] recorded engine ${engine_display} (id=$EID)"
                             else
                                 echo "[marker] warn: engine ${engine_display} not found; teardown will not delete it" >&2
                             fi
                         done
 
-                        # SKIP_INFRA=true means run_test.sh assumes catalogs already exist
-                        # (it does not create them) — mark them reused so cleanup never
-                        # deletes catalogs this run didn't create. Otherwise, anything the
-                        # preflight already flagged as reused stays reused; the rest is
-                        # attributed to this run.
+                        # Anything preflight already marked reused stays reused. Everything
+                        # else is attributed to this run (or reused when SKIP_INFRA=true,
+                        # since run_test.sh does not create catalogs).
                         record_catalog() {
                             local catalog_name=$1
                             [ -z "$catalog_name" ] && return 0
@@ -360,6 +347,8 @@ pipeline {
                 }
             }
         }
+
+        //  Run pytest against Hudi and Delta on the same engine
         stage('Per-catalog pytest sweep (Hudi/Delta)') {
             steps {
                 withEnv([
@@ -369,11 +358,9 @@ pipeline {
                     "CPD_PASSWORD=${params.CPD_PASSWORD}"
                 ]) {
                 script {
-                    // === 3-part naming workaround ===
-                    // Only Iceberg supports catalog.schema.table naming today.
-                    // Hive/Hudi/Delta must use the literal 'spark_catalog' as the
-                    // session catalog. Delete this block when the platform ships
-                    // full 3-part support (~est. Nov 2026 per teammate).
+                    // 3-part naming workaround: only Iceberg supports catalog.schema.table
+                    // today. Hive/Hudi/Delta must use the literal 'spark_catalog' as the
+                    // session catalog. Remove when the platform ships full 3-part support
                     def CATALOGS_REQUIRING_SPARK_CATALOG_ALIAS = ['hudi', 'delta', 'hive'] as Set
                     def effectiveCatalog = { String catalogType, String userSuppliedName ->
                         if (CATALOGS_REQUIRING_SPARK_CATALOG_ALIAS.contains(catalogType.toLowerCase())) {
@@ -381,12 +368,10 @@ pipeline {
                         }
                         return userSuppliedName
                     }
-                    // === /workaround ===
 
+                    // Both engines exist; ENABLE_AUTHZ decides which one this build hits.
                     def profileName = params.ENABLE_AUTHZ ? 'watsonx_authz_test' : 'watsonx_test'
-                    def qsName = params.ENABLE_AUTHZ ? 'dbt-authz-qs' : 'dbt-standard-qs'
-                    // Route to the right engine — the given script creates both, but a run
-                    // exercises one at a time based on ENABLE_AUTHZ.
+                    def qsName      = params.ENABLE_AUTHZ ? 'dbt-authz-qs'       : 'dbt-standard-qs'
                     def targetEngineDisplay = params.ENABLE_AUTHZ ? env.SPARK_ENGINE_AUTHZ_NAME : env.SPARK_ENGINE_NAME
 
                     def rounds = [
@@ -402,7 +387,7 @@ pipeline {
                     for (round in rounds) {
                         def catalogType = round.type
                         def catalogName = round.name
-                        def effective = effectiveCatalog(catalogType, catalogName)
+                        def effective   = effectiveCatalog(catalogType, catalogName)
                         catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
                             withEnv([
                                 "QS_NAME=${qsName}",
@@ -419,6 +404,7 @@ pipeline {
                                     # shellcheck disable=SC1091
                                     source "${WORKSPACE}/.venv/bin/activate"
 
+                                    # Fresh token — the previous stage's may have aged out.
                                     AUTH_BODY=$(printf '{"username":"%s","password":"%s"}' "${CPD_USERNAME}" "${CPD_PASSWORD}")
                                     AUTH_TOKEN=$(curl -s -k -X POST \
                                         "${WATSONX_HOSTNAME}/icp4d-api/v1/authorize" \
@@ -426,6 +412,7 @@ pipeline {
                                         -d "${AUTH_BODY}" \
                                         | jq -r '.token // empty')
 
+                                    # Resolve engine id + query server id by display name.
                                     ENGINE_ID=$(curl -s -k -X GET \
                                         "${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/spark_engines" \
                                         -H "Authorization: Bearer ${AUTH_TOKEN}" \
@@ -433,7 +420,6 @@ pipeline {
                                         | jq -r --arg n "${TARGET_ENGINE_DISPLAY}" \
                                             '.spark_engines[]? | select(.display_name==$n) | .id // .engine_id' \
                                         | head -n1)
-
                                     QS_ID=$(curl -s -k -X GET \
                                         "${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/spark_engines/${ENGINE_ID}/query_servers" \
                                         -H "Authorization: Bearer ${AUTH_TOKEN}" \
@@ -460,6 +446,8 @@ pipeline {
                 } // withEnv
             }
         }
+
+        // Print a small summary and publish junit XMLs from every pytest run.
         stage('Report') {
             steps {
                 sh '''
@@ -476,6 +464,9 @@ pipeline {
         }
     }
 
+    // Always runs, on success or failure. Deletes this build's engines and any
+    // catalogs this build created (reused ones are never touched), then purges
+    // the workspace.
     post {
         always {
             node('extension') {
@@ -508,9 +499,7 @@ pipeline {
                                 echo "[teardown] DELETE_CATALOG_AFTER_TEST=false; leaving catalogs in place"
                             fi
 
-                            # Delete this build's Spark engines unconditionally (unique-named per build).
-                            # run_catalog_tests.sh creates both a standard and an authz engine, so
-                            # the marker holds a list — iterate all recorded ids.
+                            # Engines are unique-named per build — delete every id the marker recorded.
                             # shellcheck disable=SC1091
                             source "${WORKSPACE}/pipeline/marker_utils.sh"
                             while IFS= read -r ENGINE_ID; do
@@ -525,7 +514,6 @@ pipeline {
                             echo "[teardown] no marker file; nothing to clean up"
                         fi
 
-                        # Workspace purge
                         rm -rf "${WORKSPACE}/.venv" "${WORKSPACE}/.home" \
                                "${WORKSPACE}/adapter/.env" "${WORKSPACE}/.env" \
                                "${WORKSPACE}/adapter" "${WORKSPACE}/.pipeline-marker.json"
