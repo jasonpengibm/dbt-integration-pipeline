@@ -23,10 +23,7 @@ require ADAPTER_ROOT
 WATSONX_SCHEMA="${WATSONX_SCHEMA:-wxd_schema}"
 WATSONX_USER="${WATSONX_USER:-admin}"
 PYTEST_TEST_PATTERN="${PYTEST_TEST_PATTERN:-tests/functional/adapter/}"
-# CATALOG_TYPE (e.g. hudi/delta) disambiguates the JUnit report filename when the
-# 3-part naming workaround collapses WATSONX_CATALOG to the same literal value
-# ("spark_catalog") across rounds (see the Jenkinsfile aliasing shim). Falls back
-# to WATSONX_CATALOG when the caller doesn't set it (e.g. the Iceberg round).
+# Set JUNIT_SUFFIX based on CATALOG_TYPE or fallback to WATSONX_CATALOG if CATALOG_TYPE is not set
 JUNIT_SUFFIX="${CATALOG_TYPE:-$WATSONX_CATALOG}"
 
 export WATSONX_CATALOG WATSONX_SCHEMA WATSONX_URI WATSONX_HOST

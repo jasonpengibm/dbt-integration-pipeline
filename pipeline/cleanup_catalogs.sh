@@ -8,15 +8,7 @@
 # Requires: marker_utils.sh sourced by caller OR available at ../pipeline/marker_utils.sh
 #
 # Usage: bash cleanup_catalogs.sh <marker_path>
-
 set -euo pipefail
-
-# NOTE: the endpoint paths below are best-guess (per the task-5 brief) and
-# isolated to _disassociate_catalog / _delete_catalog so they can be
-# corrected with a one-line edit once the team lead confirms the real API.
-#
-# _pipeline_curl is only defined here if the caller hasn't already defined
-# it (e.g. a bats test overriding it with a mock before sourcing this file).
 if ! declare -F _pipeline_curl >/dev/null 2>&1; then
     _pipeline_curl() {
         # method path

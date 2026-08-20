@@ -1,15 +1,6 @@
 #!/usr/bin/env bash
-# volume_shim.sh — clean replacement for get_available_volume_id in run_catalog_tests.sh.
-#
-# The original implementation in run_catalog_tests.sh calls log_info/log_warning
-# (which write to stdout) inside get_available_volume_id. Because the caller
-# captures the function's stdout with $(...), those log lines get embedded in
-# the volume_id variable, corrupting the JSON payload sent to the engine API.
-#
-# This shim redefines the function so only the numeric ID (or nothing) goes to
-# stdout; all diagnostic messages go to stderr. It is sourced by the pipeline
-# before invoking the given script, which re-sources this via export -f.
-#
+# volume_shim.sh — replacement for get_available_volume_id in run_catalog_tests.sh.
+
 # Usage (pipeline injects before calling the given script):
 #   source pipeline/volume_shim.sh
 #   export -f get_available_volume_id
