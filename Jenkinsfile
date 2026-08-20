@@ -1,9 +1,9 @@
-// dbt-watsonx-spark integration tests, driven end-to-end on a watsonx.data cluster.
+// dbt-watsonx-spark integration test automation pipeline
 //
-// Flow: validate params → clone the adapter under test → build an isolated Python
+// Flow: validate params → clone the adapter under test → build Python
 // venv → authenticate to CPD and write .env → run the given script (creates
 // catalogs, 2 Spark engines, a query server, then runs the Iceberg pytest suite)
-// → sweep Hudi/Delta pytest → publish junit → teardown (always runs: delete this
+// → sweep Hudi/Delta pytest → publish junit (collect test result) → teardown (always runs: delete this
 // build's engines and any catalogs this build created, then purge the workspace).
 
 pipeline {
