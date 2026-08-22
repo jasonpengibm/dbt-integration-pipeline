@@ -859,8 +859,9 @@ attach_catalog_to_engine() {
 create_query_server() {
     local engine_id=$1
     local server_name=${2:-"dbt-query-server"}
+    local authz_enabled=${3:-false}
 
-    log_info "Creating query server '$server_name' for engine $engine_id"
+    log_info "Creating query server '$server_name' for engine $engine_id (authz: $authz_enabled)"
 
     # Get auth token if not already set
     if [ -z "$AUTH_TOKEN" ]; then
@@ -873,33 +874,25 @@ create_query_server() {
     # CPD API for creating query server
     local api_url="$base_url/lakehouse/api/$LAKEHOUSE_API_VERSION/$WATSONX_INSTANCE_ID/spark_engines/$engine_id/query_servers"
 
-    # Build query server configuration
-    local driver_cores="${SPARK_DRIVER_CORES:-1}"
-    local driver_memory="${SPARK_DRIVER_MEMORY:-4g}"
-    local executor_cores="${SPARK_EXECUTOR_CORES:-1}"
-    local executor_memory="${SPARK_EXECUTOR_MEMORY:-4g}"
-    local executor_count="${SPARK_EXECUTOR_COUNT:-1}"
+    # Resource sizing must meet the CPD Spark minimum (2 cores / 6g).
+    # Using 1 core / 4g causes the Spark application to be rejected by the
+    # platform scheduler, which transitions the query server to FAILED.
+    local driver_cores="${SPARK_DRIVER_CORES:-2}"
+    local driver_memory="${SPARK_DRIVER_MEMORY:-6g}"
+    local executor_cores="${SPARK_EXECUTOR_CORES:-2}"
+    local executor_memory="${SPARK_EXECUTOR_MEMORY:-6g}"
+    local executor_count="${SPARK_EXECUTOR_COUNT:-2}"
 
     # Encode API key for Spark config
     local encoded_apikey=$(echo -n "$CPD_USERNAME:$WATSONX_APIKEY" | base64)
 
-    local server_config=$(cat <<EOF
-{
-    "query_server_details": {
-        "name": "$server_name",
-        "conf": {
-            "spark.driver.cores": "$driver_cores",
-            "spark.driver.memory": "$driver_memory",
-            "spark.executor.cores": "$executor_cores",
-            "spark.executor.memory": "$executor_memory",
-            "ae.spark.executor.count": "$executor_count",
-            "spark.hadoop.wxd.apikey": "ZenApiKey $encoded_apikey"
-        },
-        "env": {}
-    }
-}
-EOF
-)
+    local conf_str='"spark.driver.cores": "'"$driver_cores"'", "spark.driver.memory": "'"$driver_memory"'", "spark.executor.cores": "'"$executor_cores"'", "spark.executor.memory": "'"$executor_memory"'", "ae.spark.executor.count": "'"$executor_count"'", "spark.hadoop.wxd.apikey": "ZenApiKey '"$encoded_apikey"'"'
+
+    if [ "$authz_enabled" == "true" ]; then
+        conf_str+=', "spark.sql.extensions": "authz.IBMSparkACExtension"'
+    fi
+
+    local server_config="{\"query_server_details\": {\"name\": \"$server_name\", \"conf\": {$conf_str}}}"
 
    log_info "API Call: POST $api_url"
     log_info "Request Body:"
@@ -930,7 +923,7 @@ EOF
 
 wait_for_query_server() {
     local engine_id=$1
-    local server_id=$(echo "$2" | grep -oE '[0-9a-fA-F-]{36}' | head -n 1)
+    local server_id=$(echo "$2" | tr -d '[:space:]'"'")
     local max_wait=${3:-300}
     local check_interval=10 # Ensure this is local to the function
 
@@ -1117,7 +1110,7 @@ main() {
         log_info "=== Step 5: Creating Query Servers ==="
         # Create query server for standard engine
         if [ -n "$STANDARD_ENGINE_ID" ]; then
-            STANDARD_QUERY_SERVER_ID=$(create_query_server "$STANDARD_ENGINE_ID" "dbt-standard-qs")
+            STANDARD_QUERY_SERVER_ID=$(create_query_server "$STANDARD_ENGINE_ID" "dbt-standard-qs" "false")
             if [ -n "$STANDARD_QUERY_SERVER_ID" ]; then
                 wait_for_query_server "$STANDARD_ENGINE_ID" "$STANDARD_QUERY_SERVER_ID" 300
 
@@ -1140,7 +1133,7 @@ main() {
 
         # Create query server for authz engine
         if [ -n "$AUTHZ_ENGINE_ID" ]; then
-            AUTHZ_QUERY_SERVER_ID=$(create_query_server "$AUTHZ_ENGINE_ID" "dbt-authz-qs")
+            AUTHZ_QUERY_SERVER_ID=$(create_query_server "$AUTHZ_ENGINE_ID" "dbt-authz-qs" "true")
             if [ -n "$AUTHZ_QUERY_SERVER_ID" ]; then
                 wait_for_query_server "$AUTHZ_ENGINE_ID" "$AUTHZ_QUERY_SERVER_ID" 300
 
