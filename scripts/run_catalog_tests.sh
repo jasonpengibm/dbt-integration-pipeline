@@ -861,7 +861,7 @@ create_query_server() {
     local server_name=${2:-"dbt-query-server"}
     local authz_enabled=${3:-false}
 
-    log_info "Creating query server '$server_name' for engine $engine_id (authz: $authz_enabled)"
+    log_info "Creating query server '$server_name' for engine $engine_id (authz: $authz_enabled)" >&2
 
     # Get auth token if not already set
     if [ -z "$AUTH_TOKEN" ]; then
@@ -894,11 +894,9 @@ create_query_server() {
 
     local server_config="{\"query_server_details\": {\"name\": \"$server_name\", \"conf\": {$conf_str}}}"
 
-   log_info "API Call: POST $api_url"
-    log_info "Request Body:"
-    echo "$server_config" | jq '.' 2>/dev/null || echo "$server_config"
-
     log_info "API Call: POST $api_url" >&2
+    log_info "Request Body:" >&2
+    echo "$server_config" | jq '.' 2>/dev/null || echo "$server_config" >&2
 
     local response=$(curl -s -k -X POST \
         "$api_url" \
@@ -923,7 +921,7 @@ create_query_server() {
 
 wait_for_query_server() {
     local engine_id=$1
-    local server_id=$(echo "$2" | tr -d '[:space:]'"'")
+    local server_id=$(echo "$2" | grep -oE '[0-9a-fA-F-]{36}' | head -n 1)
     local max_wait=${3:-300}
     local check_interval=10 # Ensure this is local to the function
 
