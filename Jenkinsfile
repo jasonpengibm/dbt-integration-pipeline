@@ -182,7 +182,7 @@ pipeline {
                             echo "[volume] Raw API response from ${VOLUME_API}:" >&2
                             echo "$VOLUME_RESPONSE" | jq '.' 2>/dev/null || echo "$VOLUME_RESPONSE" >&2
                             echo "[volume] Available volumes (display_name → instance_id):" >&2
-                            echo "$VOLUME_RESPONSE" | jq -r '.volumes[]? | "\(.display_name) → \(.instance_id)"' 2>/dev/null >&2 || true
+                            echo "$VOLUME_RESPONSE" | jq -r '.volumes[]? | [.display_name, .instance_id] | join(" -> ")' 2>/dev/null >&2 || true
                             echo "[volume] Fix: ensure the 'spark-engine-volume' PVC is bound in the cpd namespace," >&2
                             echo "[volume]   or set SPARK_ENGINE_VOLUME_ID in the pipeline to an existing numeric volume ID." >&2
                             exit 1
