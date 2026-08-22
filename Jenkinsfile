@@ -167,15 +167,25 @@ pipeline {
                         #    doing it here cleanly lets the script skip its version.
                         VOLUME_API="${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/cpd/spark_instances"
                         echo "[volume] Looking up spark-engine-volume via ${VOLUME_API}"
-                        SPARK_ENGINE_VOLUME_ID=$(curl -s -k -X GET "${VOLUME_API}" \
+                        VOLUME_RESPONSE=$(curl -s -k -X GET "${VOLUME_API}" \
                             -H "Authorization: Bearer ${AUTH_TOKEN}" \
-                            -H "LhInstanceId: ${WATSONX_INSTANCE_ID}" \
+                            -H "LhInstanceId: ${WATSONX_INSTANCE_ID}")
+                        SPARK_ENGINE_VOLUME_ID=$(echo "$VOLUME_RESPONSE" \
                             | jq -r '.volumes[]? | select(.display_name == "cpd-instance::spark-engine-volume") | .instance_id // empty' \
                             | head -n1)
                         if [ -n "$SPARK_ENGINE_VOLUME_ID" ]; then
                             echo "[volume] Found volume ID: ${SPARK_ENGINE_VOLUME_ID}"
                         else
-                            echo "[volume] WARNING: spark-engine-volume not found; engine will be created with a new volume"
+                            echo "[volume] ERROR: spark-engine-volume not found. Cannot create Spark engine — a new PVC" >&2
+                            echo "[volume]   would be provisioned via nfs-client StorageClass, which is not available" >&2
+                            echo "[volume]   on this cluster (FailedScheduling: unbound PersistentVolumeClaims)." >&2
+                            echo "[volume] Raw API response from ${VOLUME_API}:" >&2
+                            echo "$VOLUME_RESPONSE" | jq '.' 2>/dev/null || echo "$VOLUME_RESPONSE" >&2
+                            echo "[volume] Available volumes (display_name → instance_id):" >&2
+                            echo "$VOLUME_RESPONSE" | jq -r '.volumes[]? | "\(.display_name) → \(.instance_id)"' 2>/dev/null >&2 || true
+                            echo "[volume] Fix: ensure the 'spark-engine-volume' PVC is bound in the cpd namespace," >&2
+                            echo "[volume]   or set SPARK_ENGINE_VOLUME_ID in the pipeline to an existing numeric volume ID." >&2
+                            exit 1
                         fi
                         export SPARK_ENGINE_VOLUME_ID
 
