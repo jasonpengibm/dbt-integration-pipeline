@@ -165,26 +165,33 @@ pipeline {
                         # 2. Pre-resolve the Spark engine volume ID. The given script's own
                         #    lookup writes log lines to stdout and corrupts the captured id;
                         #    doing it here cleanly lets the script skip its version.
+                        #
+                        #    Candidate volumes in preference order — first one found wins.
+                        #    spark-engine-volume PVC is Pending (nfs-client provisioner absent).
+                        #    spark-vol PVC is Bound on managed-nfs-storage and is the working one.
+                        VOLUME_CANDIDATES="spark-vol spark-engine-volume"
                         VOLUME_API="${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/cpd/spark_instances"
-                        echo "[volume] Looking up spark-engine-volume via ${VOLUME_API}"
+                        echo "[volume] Querying ${VOLUME_API}"
                         VOLUME_RESPONSE=$(curl -s -k -X GET "${VOLUME_API}" \
                             -H "Authorization: Bearer ${AUTH_TOKEN}" \
                             -H "LhInstanceId: ${WATSONX_INSTANCE_ID}")
-                        SPARK_ENGINE_VOLUME_ID=$(echo "$VOLUME_RESPONSE" \
-                            | jq -r '.volumes[]? | select(.display_name == "cpd-instance::spark-engine-volume") | .instance_id // empty' \
-                            | head -n1)
-                        if [ -n "$SPARK_ENGINE_VOLUME_ID" ]; then
-                            echo "[volume] Found volume ID: ${SPARK_ENGINE_VOLUME_ID}"
-                        else
-                            echo "[volume] ERROR: spark-engine-volume not found. Cannot create Spark engine — a new PVC" >&2
-                            echo "[volume]   would be provisioned via nfs-client StorageClass, which is not available" >&2
-                            echo "[volume]   on this cluster (FailedScheduling: unbound PersistentVolumeClaims)." >&2
-                            echo "[volume] Raw API response from ${VOLUME_API}:" >&2
-                            echo "$VOLUME_RESPONSE" | jq '.' 2>/dev/null || echo "$VOLUME_RESPONSE" >&2
-                            echo "[volume] Available volumes (display_name → instance_id):" >&2
-                            echo "$VOLUME_RESPONSE" | jq -r '.volumes[]? | [.display_name, .instance_id] | join(" -> ")' 2>/dev/null >&2 || true
-                            echo "[volume] Fix: ensure the 'spark-engine-volume' PVC is bound in the cpd namespace," >&2
-                            echo "[volume]   or set SPARK_ENGINE_VOLUME_ID in the pipeline to an existing numeric volume ID." >&2
+                        echo "[volume] Available volumes:"
+                        echo "$VOLUME_RESPONSE" | jq -r '.volumes[]? | [.display_name, .instance_id] | join(" -> ")' 2>/dev/null || true
+                        SPARK_ENGINE_VOLUME_ID=""
+                        for CANDIDATE in $VOLUME_CANDIDATES; do
+                            _VID=$(echo "$VOLUME_RESPONSE" \
+                                | jq -r --arg n "cpd-instance::${CANDIDATE}" \
+                                    '.volumes[]? | select(.display_name == $n) | .instance_id // empty' \
+                                | head -n1)
+                            if [ -n "$_VID" ]; then
+                                SPARK_ENGINE_VOLUME_ID="$_VID"
+                                echo "[volume] Using '${CANDIDATE}' -> ID: ${SPARK_ENGINE_VOLUME_ID}"
+                                break
+                            fi
+                        done
+                        if [ -z "$SPARK_ENGINE_VOLUME_ID" ]; then
+                            echo "[volume] ERROR: none of the candidate volumes (${VOLUME_CANDIDATES}) were found." >&2
+                            echo "[volume] Add the correct volume name (without cpd-instance:: prefix) to VOLUME_CANDIDATES." >&2
                             exit 1
                         fi
                         export SPARK_ENGINE_VOLUME_ID

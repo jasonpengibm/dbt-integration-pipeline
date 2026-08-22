@@ -7,11 +7,9 @@
 #   bash scripts/run_catalog_tests.sh
 
 get_available_volume_id() {
-    local volume_name="${1:-spark-engine-volume}"
-
-    # If the pipeline already resolved the ID, return it directly.
+    # If the pipeline already resolved the ID, return it directly — skip all lookups.
     if [ -n "${SPARK_ENGINE_VOLUME_ID:-}" ]; then
-        echo "[volume-shim] using pre-resolved SPARK_ENGINE_VOLUME_ID" >&2
+        echo "[volume-shim] using pre-resolved SPARK_ENGINE_VOLUME_ID=${SPARK_ENGINE_VOLUME_ID}" >&2
         echo "$SPARK_ENGINE_VOLUME_ID"
         return 0
     fi
@@ -23,25 +21,27 @@ get_available_volume_id() {
     fi
 
     local api_url="${WATSONX_HOSTNAME}/lakehouse/api/${LAKEHOUSE_API_VERSION:-v3}/${WATSONX_INSTANCE_ID}/cpd/spark_instances"
-    echo "[volume-shim] looking up volume '${volume_name}' via ${api_url}" >&2
 
     local response
     response=$(curl -s -k -X GET "${api_url}" \
         -H "Authorization: Bearer ${AUTH_TOKEN}" \
         -H "LhInstanceId: ${WATSONX_INSTANCE_ID}" 2>/dev/null)
 
-    local full_display_name="cpd-instance::${volume_name}"
-    local volume_id
-    volume_id=$(echo "$response" \
-        | jq -r ".volumes[]? | select(.display_name == \"${full_display_name}\") | .instance_id // empty" \
-        2>/dev/null | head -n1)
+    # Preference order: spark-vol (Bound, managed-nfs-storage) before
+    # spark-engine-volume (Pending, nfs-client provisioner absent on this cluster).
+    local volume_id=""
+    for candidate in spark-vol spark-engine-volume; do
+        volume_id=$(echo "$response" \
+            | jq -r --arg n "cpd-instance::${candidate}" \
+                '.volumes[]? | select(.display_name == $n) | .instance_id // empty' \
+            2>/dev/null | head -n1)
+        if [ -n "$volume_id" ]; then
+            echo "[volume-shim] using '${candidate}' -> ${volume_id}" >&2
+            echo "$volume_id"
+            return 0
+        fi
+    done
 
-    if [ -n "$volume_id" ]; then
-        echo "[volume-shim] found '${volume_name}' → ${volume_id}" >&2
-        echo "$volume_id"
-        return 0
-    else
-        echo "[volume-shim] '${volume_name}' not found; engine will be created with a new volume" >&2
-        return 1
-    fi
+    echo "[volume-shim] ERROR: no usable volume found (tried: spark-vol, spark-engine-volume)" >&2
+    return 1
 }
