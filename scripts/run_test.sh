@@ -77,7 +77,7 @@ create_query_server() {
     local encoded_apikey=$(echo -n "$CPD_USERNAME:$WATSONX_APIKEY" | base64)
 
     # Base Conf
-    local conf_str='"spark.driver.cores": "2", "spark.driver.memory": "6g","spark.executor.cores":"2","spark.executor.memory": "6g", "ae.spark.executor.count": "2", "spark.hadoop.wxd.apikey": "ZenApiKey '$encoded_apikey'"'
+    local conf_str='"spark.driver.cores": "2", "spark.driver.memory": "6g","spark.executor.cores":"2","spark.executor.memory": "6g", "ae.spark.executor.count": "2", "spark.hadoop.wxd.apikey": "ZenApiKey'$encoded_apikey'"'
 
     # Apply Authz Extension if requested
     if [ "$authz_enabled" == "true" ]; then

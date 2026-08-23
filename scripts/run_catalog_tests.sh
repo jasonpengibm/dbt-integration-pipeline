@@ -886,7 +886,7 @@ create_query_server() {
     # Encode API key for Spark config
     local encoded_apikey=$(echo -n "$CPD_USERNAME:$WATSONX_APIKEY" | base64)
 
-    local conf_str='"spark.driver.cores": "'"$driver_cores"'", "spark.driver.memory": "'"$driver_memory"'", "spark.executor.cores": "'"$executor_cores"'", "spark.executor.memory": "'"$executor_memory"'", "ae.spark.executor.count": "'"$executor_count"'", "spark.hadoop.wxd.apikey": "ZenApiKey '"$encoded_apikey"'"'
+    local conf_str='"spark.driver.cores": "'"$driver_cores"'", "spark.driver.memory": "'"$driver_memory"'", "spark.executor.cores": "'"$executor_cores"'", "spark.executor.memory": "'"$executor_memory"'", "ae.spark.executor.count": "'"$executor_count"'", "spark.hadoop.wxd.apikey": "ZenApiKey'"$encoded_apikey"'"'
 
     if [ "$authz_enabled" == "true" ]; then
         conf_str+=', "spark.sql.extensions": "authz.IBMSparkACExtension"'
