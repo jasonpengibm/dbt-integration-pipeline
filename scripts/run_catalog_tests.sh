@@ -896,7 +896,7 @@ create_query_server() {
 
     log_info "API Call: POST $api_url" >&2
     log_info "Request Body:" >&2
-    echo "$server_config" | jq '.' >&2 2>/dev/null || echo "$server_config" >&2
+    echo "$server_config" | jq '.' 2>/dev/null || echo "$server_config" >&2
 
     local response=$(curl -s -k -X POST \
         "$api_url" \
