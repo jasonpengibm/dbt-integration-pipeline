@@ -599,19 +599,15 @@ create_spark_engine() {
     local base_url=$(get_base_url)
     local auth_header=$(get_auth_header)
 
-    # Check if engine already exists.
-    # NOTE: the instance ID must be in the URL path — without it the endpoint
-    # returns an error/empty response and the check always fails, causing the
-    # script to attempt a duplicate engine creation (which then fails with 409
-    # and leaves SPARK_ENGINE_ID unset).
+    # Check if engine already exists
     local existing=$(curl -s -k -X GET \
-        "$base_url/lakehouse/api/$LAKEHOUSE_API_VERSION/$WATSONX_INSTANCE_ID/spark_engines" \
+        "$base_url/lakehouse/api/$LAKEHOUSE_API_VERSION/spark_engines" \
         -H "$auth_header" \
-        -H "LhInstanceId: $WATSONX_INSTANCE_ID" | \
-        jq -r --arg n "$engine_name" '.spark_engines[]? | select(.display_name == $n) | .id // .engine_id // empty')
+        -H "AuthInstanceId: $WATSONX_INSTANCE_ID" | \
+        jq -r '.spark_engines[]? | select(.display_name == "'$engine_name'") | .engine_id // empty')
 
     if [ -n "$existing" ]; then
-        log_success "Engine $engine_name already exists (ID: $existing), skipping creation"
+        log_warning "Engine $engine_name already exists (ID: $existing), skipping creation"
         SPARK_ENGINE_ID="$existing"
         return 0
     fi
@@ -900,7 +896,7 @@ create_query_server() {
 
     log_info "API Call: POST $api_url" >&2
     log_info "Request Body:" >&2
-    echo "$server_config" | jq '.' 2>/dev/null || echo "$server_config" >&2
+    echo "$server_config" | jq '.' >&2 2>/dev/null || echo "$server_config" >&2
 
     local response=$(curl -s -k -X POST \
         "$api_url" \
