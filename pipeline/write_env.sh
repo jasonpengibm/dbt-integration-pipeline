@@ -68,8 +68,9 @@ umask 077
     echo "ICEBERG_BUCKET=${ICEBERG_BUCKET_OVERRIDE:-$(echo "${ICEBERG_CATALOG_NAME:-iceberg_data}" | tr '_' '-')-bucket}"
     echo "DELTA_BUCKET=${DELTA_BUCKET_OVERRIDE:-$(echo "${DELTA_CATALOG_NAME:-delta_data}" | tr '_' '-')-bucket}"
     echo "HUDI_BUCKET=${HUDI_BUCKET_OVERRIDE:-$(echo "${HUDI_CATALOG_NAME:-hudi_data}" | tr '_' '-')-bucket}"
-    # Volume name for Spark engine home (volume ID is resolved and appended by the pipeline after this script)
-    echo "SPARK_ENGINE_VOLUME_NAME=spark-engine-volume"
+    # Volume name for Spark engine home (cluster-specific; supplied via the SPARK_ENGINE_VOLUME_NAME Jenkins parameter).
+    # Volume ID is resolved and appended by the pipeline after this script.
+    echo "SPARK_ENGINE_VOLUME_NAME=${SPARK_ENGINE_VOLUME_NAME}"
 } > "$OUTPUT_PATH"
 
 chmod 600 "$OUTPUT_PATH"

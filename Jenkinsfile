@@ -19,6 +19,7 @@ pipeline {
         string(name: 'CPD_USERNAME',        defaultValue: '', description: 'CPD login username (e.g. cpadmin). Leave blank for SaaS.')
         string(name: 'CPD_PASSWORD',        defaultValue: '', description: 'CPD login password. The pipeline exchanges it for a bearer token before calling the given scripts.')
         string(name: 'WATSONX_INSTANCE_ID', defaultValue: '', description: 'watsonx.data instance ID.')
+        string(name: 'SPARK_ENGINE_VOLUME_NAME', defaultValue: '', description: 'Name of the Spark engine home volume on this cluster (without the cpd-instance:: prefix). Volume names differ per cluster; check the "Available volumes" list in a prior build if unsure.')
 
         // Catalogs to exercise. Blank = skip that catalog.
         string(name: 'ICEBERG_CATALOG_NAME', defaultValue: 'iceberg_data', description: 'Iceberg catalog name. Required.')
@@ -67,6 +68,7 @@ pipeline {
                     if (!params.CPD_USERNAME?.trim())        { error 'CPD_USERNAME is required.' }
                     if (!params.CPD_PASSWORD?.trim())        { error 'CPD_PASSWORD is required.' }
                     if (!params.WATSONX_INSTANCE_ID?.trim()) { error 'WATSONX_INSTANCE_ID is required.' }
+                    if (!params.SPARK_ENGINE_VOLUME_NAME?.trim()) { error 'SPARK_ENGINE_VOLUME_NAME is required (name of the Spark engine home volume on the target cluster, without the cpd-instance:: prefix).' }
                     echo "Params validated: deployment=${params.DEPLOYMENT_FORM}, authz=${params.ENABLE_AUTHZ}, skip_infra=${params.SKIP_INFRA}"
                 }
             }
@@ -122,6 +124,7 @@ pipeline {
                 withEnv([
                     "WATSONX_HOSTNAME=${params.WATSONX_HOSTNAME}",
                     "WATSONX_INSTANCE_ID=${params.WATSONX_INSTANCE_ID}",
+                    "SPARK_ENGINE_VOLUME_NAME=${params.SPARK_ENGINE_VOLUME_NAME}",
                     "CPD_USERNAME=${params.CPD_USERNAME}",
                     "CPD_PASSWORD=${params.CPD_PASSWORD}",
                     "ICEBERG_CATALOG_NAME=${params.ICEBERG_CATALOG_NAME}",
@@ -166,10 +169,8 @@ pipeline {
                         #    lookup writes log lines to stdout and corrupts the captured id;
                         #    doing it here cleanly lets the script skip its version.
                         #
-                        #    Candidate volumes in preference order — first one found wins.
-                        #    spark-engine-volume PVC is Pending (nfs-client provisioner absent).
-                        #    spark-vol PVC is Bound on managed-nfs-storage and is the working one.
-                        VOLUME_CANDIDATES="spark-vol spark-engine-volume"
+                        #    Volume name comes from the SPARK_ENGINE_VOLUME_NAME parameter — it
+                        #    is cluster-specific (e.g. spark-vol on one cluster, vol12 on another).
                         VOLUME_API="${WATSONX_HOSTNAME}/lakehouse/api/v3/${WATSONX_INSTANCE_ID}/cpd/spark_instances"
                         echo "[volume] Querying ${VOLUME_API}"
                         VOLUME_RESPONSE=$(curl -s -k -X GET "${VOLUME_API}" \
@@ -177,23 +178,16 @@ pipeline {
                             -H "LhInstanceId: ${WATSONX_INSTANCE_ID}")
                         echo "[volume] Available volumes:"
                         echo "$VOLUME_RESPONSE" | jq -r '.volumes[]? | [.display_name, .instance_id] | join(" -> ")' 2>/dev/null || true
-                        SPARK_ENGINE_VOLUME_ID=""
-                        for CANDIDATE in $VOLUME_CANDIDATES; do
-                            _VID=$(echo "$VOLUME_RESPONSE" \
-                                | jq -r --arg n "cpd-instance::${CANDIDATE}" \
-                                    '.volumes[]? | select(.display_name == $n) | .instance_id // empty' \
-                                | head -n1)
-                            if [ -n "$_VID" ]; then
-                                SPARK_ENGINE_VOLUME_ID="$_VID"
-                                echo "[volume] Using '${CANDIDATE}' -> ID: ${SPARK_ENGINE_VOLUME_ID}"
-                                break
-                            fi
-                        done
+                        SPARK_ENGINE_VOLUME_ID=$(echo "$VOLUME_RESPONSE" \
+                            | jq -r --arg n "cpd-instance::${SPARK_ENGINE_VOLUME_NAME}" \
+                                '.volumes[]? | select(.display_name == $n) | .instance_id // empty' \
+                            | head -n1)
                         if [ -z "$SPARK_ENGINE_VOLUME_ID" ]; then
-                            echo "[volume] ERROR: none of the candidate volumes (${VOLUME_CANDIDATES}) were found." >&2
-                            echo "[volume] Add the correct volume name (without cpd-instance:: prefix) to VOLUME_CANDIDATES." >&2
+                            echo "[volume] ERROR: volume '${SPARK_ENGINE_VOLUME_NAME}' not found on this cluster." >&2
+                            echo "[volume] Pick a name from the 'Available volumes' list above (without the cpd-instance:: prefix) and set the SPARK_ENGINE_VOLUME_NAME parameter." >&2
                             exit 1
                         fi
+                        echo "[volume] Using '${SPARK_ENGINE_VOLUME_NAME}' -> ID: ${SPARK_ENGINE_VOLUME_ID}"
                         export SPARK_ENGINE_VOLUME_ID
 
                         # 3. Render .env and append the token + volume id for the given script.
@@ -221,6 +215,7 @@ pipeline {
                 withEnv([
                     "WATSONX_HOSTNAME=${params.WATSONX_HOSTNAME}",
                     "WATSONX_INSTANCE_ID=${params.WATSONX_INSTANCE_ID}",
+                    "SPARK_ENGINE_VOLUME_NAME=${params.SPARK_ENGINE_VOLUME_NAME}",
                     "CPD_USERNAME=${params.CPD_USERNAME}",
                     "CPD_PASSWORD=${params.CPD_PASSWORD}",
                     "SKIP_INFRA=${params.SKIP_INFRA}",
@@ -371,6 +366,7 @@ pipeline {
                 withEnv([
                     "WATSONX_HOSTNAME=${params.WATSONX_HOSTNAME}",
                     "WATSONX_INSTANCE_ID=${params.WATSONX_INSTANCE_ID}",
+                    "SPARK_ENGINE_VOLUME_NAME=${params.SPARK_ENGINE_VOLUME_NAME}",
                     "CPD_USERNAME=${params.CPD_USERNAME}",
                     "CPD_PASSWORD=${params.CPD_PASSWORD}"
                 ]) {
@@ -490,6 +486,7 @@ pipeline {
                 withEnv([
                     "WATSONX_HOSTNAME=${params.WATSONX_HOSTNAME}",
                     "WATSONX_INSTANCE_ID=${params.WATSONX_INSTANCE_ID}",
+                    "SPARK_ENGINE_VOLUME_NAME=${params.SPARK_ENGINE_VOLUME_NAME}",
                     "CPD_USERNAME=${params.CPD_USERNAME}",
                     "CPD_PASSWORD=${params.CPD_PASSWORD}",
                     "DELETE_CATALOG_AFTER_TEST=${params.DELETE_CATALOG_AFTER_TEST}"

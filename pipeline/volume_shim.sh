@@ -20,6 +20,16 @@ get_available_volume_id() {
         return 1
     fi
 
+    # Volume name is cluster-specific — comes from the SPARK_ENGINE_VOLUME_NAME
+    # Jenkins parameter (exported by the pipeline). The positional argument the
+    # given script passes to this function is ignored on purpose: it's a stale
+    # default from the un-shimmed version.
+    local volume_name="${SPARK_ENGINE_VOLUME_NAME:-}"
+    if [ -z "$volume_name" ]; then
+        echo "[volume-shim] ERROR: SPARK_ENGINE_VOLUME_NAME not set" >&2
+        return 1
+    fi
+
     local api_url="${WATSONX_HOSTNAME}/lakehouse/api/${LAKEHOUSE_API_VERSION:-v3}/${WATSONX_INSTANCE_ID}/cpd/spark_instances"
 
     local response
@@ -27,21 +37,17 @@ get_available_volume_id() {
         -H "Authorization: Bearer ${AUTH_TOKEN}" \
         -H "LhInstanceId: ${WATSONX_INSTANCE_ID}" 2>/dev/null)
 
-    # Preference order: spark-vol (Bound, managed-nfs-storage) before
-    # spark-engine-volume (Pending, nfs-client provisioner absent on this cluster).
-    local volume_id=""
-    for candidate in spark-vol spark-engine-volume; do
-        volume_id=$(echo "$response" \
-            | jq -r --arg n "cpd-instance::${candidate}" \
-                '.volumes[]? | select(.display_name == $n) | .instance_id // empty' \
-            2>/dev/null | head -n1)
-        if [ -n "$volume_id" ]; then
-            echo "[volume-shim] using '${candidate}' -> ${volume_id}" >&2
-            echo "$volume_id"
-            return 0
-        fi
-    done
+    local volume_id
+    volume_id=$(echo "$response" \
+        | jq -r --arg n "cpd-instance::${volume_name}" \
+            '.volumes[]? | select(.display_name == $n) | .instance_id // empty' \
+        2>/dev/null | head -n1)
+    if [ -n "$volume_id" ]; then
+        echo "[volume-shim] using '${volume_name}' -> ${volume_id}" >&2
+        echo "$volume_id"
+        return 0
+    fi
 
-    echo "[volume-shim] ERROR: no usable volume found (tried: spark-vol, spark-engine-volume)" >&2
+    echo "[volume-shim] ERROR: volume '${volume_name}' not found on this cluster" >&2
     return 1
 }

@@ -50,7 +50,10 @@ create_spark_engine() {
     local existing_id=$(get_engine_id_by_name "$engine_name")
     if [ -n "$existing_id" ]; then log_success "Using existing engine: $existing_id" >&2; echo "$existing_id"; return 0; fi
 
-    local vol_id=$(echo "$(get_available_volume_id "spark-engine-volume")" | tr -d '[:space:]')
+    local vol_id="${SPARK_ENGINE_VOLUME_ID:-}"
+    if [ -z "$vol_id" ]; then
+        vol_id=$(echo "$(get_available_volume_id "${SPARK_ENGINE_VOLUME_NAME:-}")" | tr -d '[:space:]')
+    fi
     local catalogs_json="[\"$ICEBERG_CATALOG_NAME\", \"$DELTA_CATALOG_NAME\", \"$HUDI_CATALOG_NAME\"]"
     local engine_config=$(cat <<EOF
 {
