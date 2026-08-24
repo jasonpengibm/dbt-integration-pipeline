@@ -162,8 +162,14 @@ pipeline {
                         echo "[auth] CPD token obtained."
                         export AUTH_TOKEN
 
-                        # The given scripts build Spark's ZenApiKey from CPD_PASSWORD.
-                        export WATSONX_APIKEY="${CPD_PASSWORD}"
+                        # EXPERIMENT: pass the CPD bearer token as WATSONX_APIKEY.
+                        # The given scripts use WATSONX_APIKEY in two places:
+                        #   1) ZenApiKey base64("$CPD_USERNAME:$WATSONX_APIKEY") in the QS conf
+                        #   2) <apikey> substitution in the dbt profile template
+                        # The dbt adapter POSTs this value as `api_key` to /icp4d-api/v1/authorize,
+                        # which historically rejects bearer tokens — trying it anyway to see
+                        # whether this CPD version accepts it.
+                        export WATSONX_APIKEY="${AUTH_TOKEN}"
 
                         # 2. Pre-resolve the Spark engine volume ID. The given script's own
                         #    lookup writes log lines to stdout and corrupts the captured id;
