@@ -116,19 +116,6 @@ pipeline {
                     pip install -e "${WORKSPACE}/adapter"
                     pip install pytest dbt-tests-adapter
 
-                    # Patch the dbt adapter authenticator to use "password" instead of
-                    # "api_key" in the CPD auth POST body. The CPD 5.x cluster on Fyre
-                    # only accepts {"username":..., "password":...} — not "api_key".
-                    # Use a variable for the sed pattern to avoid Groovy parsing the backslash.
-                    AUTHENTICATOR=$(find "${WORKSPACE}/.venv" -path "*/watsonx_spark/http_auth/wxd_authenticator.py" | head -n1)
-                    if [ -n "$AUTHENTICATOR" ]; then
-                        SED_PATTERN='"api_key": self[.]apikey'
-                        SED_REPLACE='"password": self.apikey'
-                        sed -i "s|${SED_PATTERN}|${SED_REPLACE}|g" "$AUTHENTICATOR"
-                        echo "[patch] wxd_authenticator.py: replaced api_key with password"
-                    else
-                        echo "[patch] WARNING: wxd_authenticator.py not found, skipping patch"
-                    fi
                 '''
                 } // withEnv
             }
