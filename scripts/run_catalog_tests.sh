@@ -1019,7 +1019,7 @@ get_query_server_profile() {
         profile=$(echo "$profile" | sed "s|<wxd-schema>|$schema|g")
         profile=$(echo "$profile" | sed "s|<wxd-catalog>|$catalog|g")
         profile=$(echo "$profile" | sed "s|<username>|$CPD_USERNAME|g")
-        profile=$(echo "$profile" | sed "s|<apikey>|$WATSONX_APIKEY|g")
+        profile=$(echo "$profile" | sed "s|apikey: \"<apikey>\"|token: \"$AUTH_TOKEN\"|g")
 
         echo "$profile"
         return 0
