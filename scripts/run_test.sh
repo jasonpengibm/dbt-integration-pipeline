@@ -110,7 +110,7 @@ get_query_server_profile() {
     local api_url="$(get_base_url)/lakehouse/api/$LAKEHOUSE_API_VERSION/$WATSONX_INSTANCE_ID/spark_engines/$engine_id/query_servers/$server_id/profile"
     local response=$(curl -s -k -X GET "$api_url" -H "$(get_auth_header)" -H "LhInstanceId: $WATSONX_INSTANCE_ID")
     echo "$response" | jq -r '.profile // empty' | \
-        sed "s|<wxd-schema>|wxd_schema|g; s|<wxd-catalog>|$catalog|g; s|<username>|$CPD_USERNAME|g; s|apikey: \"<apikey>\"|token: \"$AUTH_TOKEN\"|g" | \
+        sed "s|<wxd-schema>|wxd_schema|g; s|<wxd-catalog>|$catalog|g; s|<username>|$CPD_USERNAME|g; s|<apikey>|$WATSONX_APIKEY|g" | \
         awk '/schema: / {print; print "      auto_location: true"; next} {print}'
 }
 

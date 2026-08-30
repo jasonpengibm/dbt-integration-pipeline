@@ -18,6 +18,7 @@ pipeline {
         string(name: 'WATSONX_HOSTNAME',    defaultValue: '', description: 'watsonx.data hostname or CPD base URL (e.g. https://cpd.example.com).')
         string(name: 'CPD_USERNAME',        defaultValue: '', description: 'CPD login username (e.g. cpadmin). Leave blank for SaaS.')
         string(name: 'CPD_PASSWORD',        defaultValue: '', description: 'CPD login password. The pipeline exchanges it for a bearer token before calling the given scripts.')
+        string(name: 'CPD_API_KEY',         defaultValue: '', description: 'CPD user API key. Used by the dbt adapter to authenticate to the query server. If blank, falls back to CPD_PASSWORD.')
         string(name: 'WATSONX_INSTANCE_ID', defaultValue: '', description: 'watsonx.data instance ID.')
         string(name: 'SPARK_ENGINE_VOLUME_NAME', defaultValue: '', description: 'Name of the Spark engine home volume on this cluster (without the cpd-instance:: prefix). Volume names differ per cluster; check the "Available volumes" list in a prior build if unsure.')
 
@@ -102,6 +103,7 @@ pipeline {
                     env.DEPLOYMENT_TYPE         = params.DEPLOYMENT_FORM.toLowerCase()
                     env.PYTHON_VENV_PATH        = "${env.WORKSPACE}/.venv"
                 }
+                withEnv(["CPD_API_KEY=${params.CPD_API_KEY}", "CPD_PASSWORD=${params.CPD_PASSWORD}"]) {
                 sh '''
                     set -euo pipefail
                     export HOME="${WORKSPACE}/.home"
@@ -113,7 +115,19 @@ pipeline {
                     pip install --upgrade pip
                     pip install -e "${WORKSPACE}/adapter"
                     pip install pytest dbt-tests-adapter
+
+                    # Patch the dbt adapter authenticator to use "password" instead of
+                    # "api_key" in the CPD auth POST body. The CPD 5.x cluster on Fyre
+                    # only accepts {"username":..., "password":...} — not "api_key".
+                    AUTHENTICATOR=$(find "${WORKSPACE}/.venv" -path "*/watsonx_spark/http_auth/wxd_authenticator.py" | head -n1)
+                    if [ -n "$AUTHENTICATOR" ]; then
+                        sed -i 's/"api_key": self\.apikey/"password": self.apikey/g' "$AUTHENTICATOR"
+                        echo "[patch] wxd_authenticator.py: replaced api_key with password"
+                    else
+                        echo "[patch] WARNING: wxd_authenticator.py not found, skipping patch"
+                    fi
                 '''
+                } // withEnv
             }
         }
 
@@ -127,6 +141,7 @@ pipeline {
                     "SPARK_ENGINE_VOLUME_NAME=${params.SPARK_ENGINE_VOLUME_NAME}",
                     "CPD_USERNAME=${params.CPD_USERNAME}",
                     "CPD_PASSWORD=${params.CPD_PASSWORD}",
+                    "CPD_API_KEY=${params.CPD_API_KEY}",
                     "ICEBERG_CATALOG_NAME=${params.ICEBERG_CATALOG_NAME}",
                     "HUDI_CATALOG_NAME=${params.HUDI_CATALOG_NAME}",
                     "DELTA_CATALOG_NAME=${params.DELTA_CATALOG_NAME}",
@@ -162,8 +177,16 @@ pipeline {
                         echo "[auth] CPD token obtained."
                         export AUTH_TOKEN
 
-                        # The given scripts build Spark's ZenApiKey from CPD_PASSWORD.
-                        export WATSONX_APIKEY="${CPD_PASSWORD}"
+                        # WATSONX_APIKEY is placed into the dbt profile as the <apikey>
+                        # placeholder. Use CPD_API_KEY when provided; fall back to
+                        # CPD_PASSWORD for clusters that accept password-based auth.
+                        if [ -n "${CPD_API_KEY:-}" ]; then
+                            export WATSONX_APIKEY="${CPD_API_KEY}"
+                            echo "[auth] Using CPD_API_KEY for dbt profile apikey"
+                        else
+                            export WATSONX_APIKEY="${CPD_PASSWORD}"
+                            echo "[auth] CPD_API_KEY not set; using CPD_PASSWORD for dbt profile apikey"
+                        fi
 
                         # 2. Pre-resolve the Spark engine volume ID. The given script's own
                         #    lookup writes log lines to stdout and corrupts the captured id;
