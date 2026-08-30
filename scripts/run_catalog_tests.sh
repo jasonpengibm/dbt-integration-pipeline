@@ -883,10 +883,7 @@ create_query_server() {
     local executor_memory="${SPARK_EXECUTOR_MEMORY:-6g}"
     local executor_count="${SPARK_EXECUTOR_COUNT:-2}"
 
-    # Encode API key for Spark config
-    local encoded_apikey=$(echo -n "$CPD_USERNAME:$WATSONX_APIKEY" | base64)
-
-    local conf_str='"spark.driver.cores": "'"$driver_cores"'", "spark.driver.memory": "'"$driver_memory"'", "spark.executor.cores": "'"$executor_cores"'", "spark.executor.memory": "'"$executor_memory"'", "ae.spark.executor.count": "'"$executor_count"'", "spark.hadoop.wxd.apikey": "ZenApiKey '"$encoded_apikey"'"'
+    local conf_str='"spark.driver.cores": "'"$driver_cores"'", "spark.driver.memory": "'"$driver_memory"'", "spark.executor.cores": "'"$executor_cores"'", "spark.executor.memory": "'"$executor_memory"'", "ae.spark.executor.count": "'"$executor_count"'", "spark.hadoop.wxd.apikey": "Bearer '"$AUTH_TOKEN"'"'
 
     if [ "$authz_enabled" == "true" ]; then
         conf_str+=', "spark.sql.extensions": "authz.IBMSparkACExtension"'
@@ -906,6 +903,8 @@ create_query_server() {
         -H "Content-Type: application/json" \
         -d "$server_config")
 
+    log_info "[diag] create response: $response" >&2
+
     # Extract clean ID
     local server_id=$(echo "$response" | jq -r '.id // empty' | tr -d "[:space:]'")
 
@@ -922,39 +921,72 @@ create_query_server() {
 
 wait_for_query_server() {
     local engine_id=$1
-    local server_id=$(echo "$2" | grep -oE '[0-9a-fA-F-]{36}' | head -n 1)
+    local raw_id=$2
+    # Keep the original UUID extraction, but retain the raw value as a fallback.
+    # If the API ever returns a non-UUID id, the grep silently yields "" and every
+    # poll below reports "not found" instead of "still starting".
+    local server_id=$(echo "$raw_id" | grep -oE '[0-9a-fA-F-]{36}' | head -n 1 || true)
+    if [ -z "$server_id" ]; then
+        log_warning "[diag] UUID extraction found nothing in id '$raw_id'; using the raw value" >&2
+        server_id="$raw_id"
+    fi
     local max_wait=${3:-300}
-    local check_interval=10 # Ensure this is local to the function
+    local check_interval=10
 
-    log_info "Waiting for query server $server_id to be RUNNING..."
+    log_info "Waiting for query server $server_id to be RUNNING... (max ${max_wait}s)"
 
+    local qs_url="$(get_base_url)/lakehouse/api/$LAKEHOUSE_API_VERSION/$WATSONX_INSTANCE_ID/spark_engines/$engine_id/query_servers"
     local elapsed=0
+    local dumped=0
+    local response=""
     while [ $elapsed -lt $max_wait ]; do
-        local response=$(curl -s -k -X GET \
-            "$(get_base_url)/lakehouse/api/$LAKEHOUSE_API_VERSION/$WATSONX_INSTANCE_ID/spark_engines/$engine_id/query_servers" \
+        response=$(curl -s -k -X GET "$qs_url" \
             -H "$(get_auth_header)" \
             -H "LhInstanceId: $WATSONX_INSTANCE_ID" 2>/dev/null)
 
-        # Extract state safely
-        local state=$(echo "$response" | jq -r --arg sid "$server_id" '.query_servers[]? | select(.id == $sid) | .state' 2>/dev/null)
+        local entry=$(echo "$response" | jq -c --arg sid "$server_id" \
+            '.query_servers[]? | select(.id == $sid)' 2>/dev/null)
+
+        # The field is not guaranteed to be .state — the spark_engines API returns
+        # .status. Read whichever exists so a healthy server is not misread as absent.
+        local state=$(echo "$entry" | jq -r '.state // .status // empty' 2>/dev/null)
+
+        # Dump the whole object once. Any reason/message the platform attaches to a
+        # stuck server lives in here, and nothing in this script ever printed it.
+        if [ "$dumped" -eq 0 ]; then
+            if [ -n "$entry" ]; then
+                log_info "[diag] query server object: $entry" >&2
+            else
+                log_warning "[diag] id '$server_id' absent from the list. Full response:" >&2
+                echo "$response" | jq '.' >&2 2>/dev/null || echo "$response" >&2
+            fi
+            dumped=1
+        fi
 
         if [ "$state" == "RUNNING" ] || [ "$state" == "ACTIVE" ]; then
             log_success "Query server is RUNNING"
             return 0
         elif [ "$state" == "FAILED" ] || [ "$state" == "STOPPED" ]; then
             log_error "Query server failed or stopped (state: $state)"
+            log_error "[diag] final object: $entry" >&2
             return 1
-        elif [ -n "$state" ] && [ "$state" != "null" ]; then
-            log_info "Query server state: $state (waiting...)"
+        elif [ -n "$state" ]; then
+            log_info "Query server state: $state (${elapsed}s/${max_wait}s)"
+            # Re-dump periodically: the state string alone never says *why*.
+            if [ "$elapsed" -gt 0 ] && [ $((elapsed % 60)) -eq 0 ]; then
+                log_info "[diag] object at ${elapsed}s: $entry" >&2
+            fi
         else
             log_warning "Server ID $server_id not found in response yet."
         fi
 
-        sleep "$check_interval" # Quotes prevent word-splitting errors
+        sleep "$check_interval"
         elapsed=$((elapsed + check_interval))
     done
 
-    log_error "Timeout waiting for query server to start"
+    log_error "Timeout waiting for query server to start after ${max_wait}s"
+    log_error "[diag] last query_servers response:" >&2
+    echo "$response" | jq '.' >&2 2>/dev/null || echo "$response" >&2
     return 1
 }
 
@@ -1111,7 +1143,7 @@ main() {
         if [ -n "$STANDARD_ENGINE_ID" ]; then
             STANDARD_QUERY_SERVER_ID=$(create_query_server "$STANDARD_ENGINE_ID" "dbt-standard-qs" "false")
             if [ -n "$STANDARD_QUERY_SERVER_ID" ]; then
-                wait_for_query_server "$STANDARD_ENGINE_ID" "$STANDARD_QUERY_SERVER_ID" 300
+                wait_for_query_server "$STANDARD_ENGINE_ID" "$STANDARD_QUERY_SERVER_ID" "${QUERY_SERVER_WAIT:-300}"
 
                 # Generate and save profile
                 log_info "Generating dbt profile for standard engine..."
@@ -1134,7 +1166,7 @@ main() {
         if [ -n "$AUTHZ_ENGINE_ID" ]; then
             AUTHZ_QUERY_SERVER_ID=$(create_query_server "$AUTHZ_ENGINE_ID" "dbt-authz-qs" "true")
             if [ -n "$AUTHZ_QUERY_SERVER_ID" ]; then
-                wait_for_query_server "$AUTHZ_ENGINE_ID" "$AUTHZ_QUERY_SERVER_ID" 300
+                wait_for_query_server "$AUTHZ_ENGINE_ID" "$AUTHZ_QUERY_SERVER_ID" "${QUERY_SERVER_WAIT:-300}"
 
                 # Generate and save profile (append to existing)
                 log_info "Generating dbt profile for authz engine..."
