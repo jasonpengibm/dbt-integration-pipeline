@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# run_pytest_for_catalog.sh — invoke pytest against the adapter with the caller-supplied
-# WATSONX_CATALOG in effect. The 3-part naming aliasing decision has already been made
-# by the Jenkinsfile; this script only forwards.
+# run_pytest_for_catalog.sh — run the dbt adapter test suite against a single catalog.
+# The Jenkinsfile calls this once per catalog type (iceberg, hudi, delta).
+
 set -euo pipefail
 
+# check required variables.
 require() {
     local var=$1
     if [[ -z "${!var:-}" ]]; then
@@ -23,7 +24,7 @@ require ADAPTER_ROOT
 WATSONX_SCHEMA="${WATSONX_SCHEMA:-wxd_schema}"
 WATSONX_USER="${WATSONX_USER:-admin}"
 PYTEST_TEST_PATTERN="${PYTEST_TEST_PATTERN:-tests/functional/adapter/}"
-# Set JUNIT_SUFFIX based on CATALOG_TYPE or fallback to WATSONX_CATALOG if CATALOG_TYPE is not set
+# Use CATALOG_TYPE for the JUnit filename if set, otherwise fall back to the catalog name.
 JUNIT_SUFFIX="${CATALOG_TYPE:-$WATSONX_CATALOG}"
 
 export WATSONX_CATALOG WATSONX_SCHEMA WATSONX_URI WATSONX_HOST

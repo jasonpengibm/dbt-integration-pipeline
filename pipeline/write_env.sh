@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# write_env.sh — render a .env file for the given-scripts to source.
-# Usage: bash write_env.sh <output_path>
+# write_env.sh — render a .env file for the other scripts to source.
 set -euo pipefail
 
 OUTPUT_PATH="${1:-}"
@@ -32,6 +31,8 @@ if [[ "$DEPLOYMENT_TYPE" == "cpd" && -z "${CPD_USERNAME:-}" ]]; then
     exit 1
 fi
 
+# Returns "true" if a catalog name was provided, "false" otherwise.
+# Used to set the *_CATALOG_ENABLED flags below.
 catalog_enabled() {
     local name=${1:-}
     if [[ -z "$name" ]]; then echo "false"; else echo "true"; fi

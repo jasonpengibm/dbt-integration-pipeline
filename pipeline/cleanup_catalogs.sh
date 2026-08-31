@@ -1,17 +1,12 @@
 #!/usr/bin/env bash
 # cleanup_catalogs.sh — safely tear down catalogs this run created.
-# Reads the marker written during setup, disassociates each created catalog
-# from the run's engine, then deletes the catalog. Reused catalogs are
-# never touched. Underlying buckets are never touched.
-#
-# Requires (env): WATSONX_HOSTNAME, WATSONX_INSTANCE_ID, LAKEHOUSE_API_VERSION, AUTH_TOKEN
-# Requires: marker_utils.sh sourced by caller OR available at ../pipeline/marker_utils.sh
+# Reads the marker written during setup, disassociates and deletes each 
+# created catalog.  
 #
 # Usage: bash cleanup_catalogs.sh <marker_path>
 set -euo pipefail
 if ! declare -F _pipeline_curl >/dev/null 2>&1; then
     _pipeline_curl() {
-        # method path
         local method=$1
         local path=$2
         curl -s -k -f --show-error -X "$method" \

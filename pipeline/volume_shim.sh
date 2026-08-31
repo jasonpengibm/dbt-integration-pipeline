@@ -7,23 +7,18 @@
 #   bash scripts/run_catalog_tests.sh
 
 get_available_volume_id() {
-    # If the pipeline already resolved the ID, return it directly — skip all lookups.
+    # If the pipeline already resolved the ID, skip lookups.
     if [ -n "${SPARK_ENGINE_VOLUME_ID:-}" ]; then
         echo "[volume-shim] using pre-resolved SPARK_ENGINE_VOLUME_ID=${SPARK_ENGINE_VOLUME_ID}" >&2
         echo "$SPARK_ENGINE_VOLUME_ID"
         return 0
     fi
 
-    # Auth token must already be set (pipeline pre-authenticates).
     if [ -z "${AUTH_TOKEN:-}" ]; then
         echo "[volume-shim] ERROR: AUTH_TOKEN not set" >&2
         return 1
     fi
 
-    # Volume name is cluster-specific — comes from the SPARK_ENGINE_VOLUME_NAME
-    # Jenkins parameter (exported by the pipeline). The positional argument the
-    # given script passes to this function is ignored on purpose: it's a stale
-    # default from the un-shimmed version.
     local volume_name="${SPARK_ENGINE_VOLUME_NAME:-}"
     if [ -z "$volume_name" ]; then
         echo "[volume-shim] ERROR: SPARK_ENGINE_VOLUME_NAME not set" >&2

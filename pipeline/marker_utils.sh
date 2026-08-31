@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # marker_utils.sh — record what a pipeline run created for later cleanup.
-# All functions require jq on PATH.
 
 marker_init() {
     local marker_path=$1
@@ -28,6 +27,7 @@ marker_record_engine() {
     mv "$tmp" "$marker_path"
 }
 
+# Record a catalog that was freshly created this run 
 marker_record_catalog_created() {
     local marker_path=$1
     local catalog=$2
@@ -40,6 +40,7 @@ marker_record_catalog_created() {
     mv "$tmp" "$marker_path"
 }
 
+# Record a catalog that already existed and was reused 
 marker_record_catalog_reused() {
     local marker_path=$1
     local catalog=$2
@@ -52,16 +53,19 @@ marker_record_catalog_reused() {
     mv "$tmp" "$marker_path"
 }
 
+# Print each created catalog name on its own line (used by cleanup to know what to delete).
 marker_get_catalogs_created() {
     local marker_path=$1
     jq -r '.catalogs_created[]' "$marker_path"
 }
 
+# Print each recorded engine ID on its own line.
 marker_get_engine_ids() {
     local marker_path=$1
     jq -r '.engine_ids[]?' "$marker_path"
 }
 
+# Return 0 if the given catalog was reused (not created) this run.
 marker_has_catalog_reused() {
     local marker_path=$1
     local catalog=$2
